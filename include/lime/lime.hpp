@@ -64,7 +64,7 @@ namespace lime {
 	 * give a recipient GRUU and get it back with the header which must be sent to recipient with the cipher text
 	 */
 	struct RecipientData {
-		const std::string deviceId; /**< input: recipient deviceId (shall be GRUU) */
+		std::string deviceId; /**< input: recipient deviceId (shall be GRUU) */
 		lime::PeerDeviceStatus peerStatus; /**< output: after encrypt calls back, it will hold the status of this peer device:\n
 						     - unknown: first interaction with this device)
 						     - untrusted: device is kown but we never confirmed its identity public key
@@ -76,6 +76,7 @@ namespace lime {
 		 * @param[in] deviceId	the recipient device Id (its GRUU)
 		 */
 		RecipientData(const std::string &deviceId) : deviceId{deviceId}, peerStatus{lime::PeerDeviceStatus::unknown}, DRmessage{} {};
+		RecipientData(const RecipientData &other) : deviceId{other.deviceId}, peerStatus{other.peerStatus}, DRmessage{other.DRmessage} {};
 	};
 
 	/** what a Lime callback could possibly say */
