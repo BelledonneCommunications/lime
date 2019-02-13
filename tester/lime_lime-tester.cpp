@@ -23,6 +23,7 @@
 #include "lime-tester.hpp"
 #include "lime_keys.hpp"
 #include "lime-tester-utils.hpp"
+#include "lime_mutex.hpp"
 
 #include <bctoolbox/tester.h>
 #include <bctoolbox/exception.hh>
@@ -3067,6 +3068,9 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 	auto Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost));
 	auto aliceDeviceName = lime_tester::makeRandomDeviceName("alice.");
 
+	// a disabled LimeMutex to feed internal functions
+	auto mutex = std::make_shared<LimeMutex>(false);
+
 	try {
 		/* create a user in a fresh database */
 		Manager->create_user(*aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback);
@@ -3074,7 +3078,7 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 		if (counters.operation_failed == 1) return; // skip the end of the test if we can't do this
 
 		/* load alice from from DB */
-		auto alice = load_LimeUser(dbFilenameAlice, *aliceDeviceName, X3DHServerPost);
+		auto alice = load_LimeUser(dbFilenameAlice, *aliceDeviceName, X3DHServerPost, mutex);
 		/* no need to wait here, it shall load alice immediately */
 	} catch (BctbxException &e) {
 		LIME_LOGE << e;
@@ -3084,7 +3088,7 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 	bool gotExpectedException = false;
 	/* Try to create the same user in the same data base, it must fail with exception raised */
 	try {
-		auto alice = insert_LimeUser(dbFilenameAlice, *aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, X3DHServerPost, callback);
+		auto alice = insert_LimeUser(dbFilenameAlice, *aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, X3DHServerPost, callback, mutex);
 		/* no need to wait here, it must fail immediately */
 	} catch (BctbxException &) {
 		gotExpectedException = true;
@@ -3098,7 +3102,7 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 	/* Try to load a user which is not in DB, it must fail with exception raised */
 	gotExpectedException = false;
 	try {
-		auto alice = load_LimeUser(dbFilenameAlice, "bob", X3DHServerPost);
+		auto alice = load_LimeUser(dbFilenameAlice, "bob", X3DHServerPost, mutex);
 		/* no need to wait here, it must fail immediately */
 	} catch (BctbxException &) {
 		gotExpectedException = true;
@@ -3139,7 +3143,7 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 
 	/* Create Alice again */
 	try {
-		std::shared_ptr<LimeGeneric> alice = insert_LimeUser(dbFilenameAlice, *aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, X3DHServerPost, callback);
+		std::shared_ptr<LimeGeneric> alice = insert_LimeUser(dbFilenameAlice, *aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, X3DHServerPost, callback, mutex);
 		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
 
 		// create another manager with a fresh DB

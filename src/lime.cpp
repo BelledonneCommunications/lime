@@ -23,6 +23,7 @@
 #include "bctoolbox/exception.hh"
 #include "lime_double_ratchet.hpp"
 #include "lime_double_ratchet_protocol.hpp"
+#include "lime_mutex.hpp"
 
 using namespace::std;
 
@@ -44,12 +45,13 @@ namespace lime {
 	 * @param[in]		url				URL of the X3DH key server used to publish our keys(retrieved from DB)
 	 * @param[in]		X3DH_post_data			A function used to communicate with the X3DH server
 	 * @param[in]		Uid				the DB internal Id for this user, speed up DB operations by holding it in DB
+	 * @param[in]		mutex				pointer to the shared mutex used to manage DB access in multithreading environment
 	 *
 	 * @note: ownership of localStorage pointer is transfered to a shared pointer, private menber of Lime class
 	 */
 	template <typename Curve>
-	Lime<Curve>::Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, const long int Uid)
-	: m_RNG{make_RNG()}, m_selfDeviceId{deviceId},
+	Lime<Curve>::Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, const long int Uid, std::shared_ptr<LimeMutex> &mutex)
+	: m_RNG{make_RNG()}, m_selfDeviceId{deviceId}, m_mutex{mutex},
 	m_Ik{}, m_Ik_loaded(false),
 	m_localStorage(std::move(localStorage)), m_db_Uid{Uid},
 	m_X3DH_post_data{X3DH_post_data}, m_X3DH_Server_URL{url},
@@ -66,12 +68,13 @@ namespace lime {
 	 * @param[in]		deviceId			device Id(shall be GRUU), stored in the structure
 	 * @param[in]		url				URL of the X3DH key server used to publish our keys
 	 * @param[in]		X3DH_post_data			A function used to communicate with the X3DH server
+	 * @param[in]		mutex				pointer to the shared mutex used to manage DB access in multithreading environment
 	 *
 	 * @note: ownership of localStorage pointer is transfered to a shared pointer, private menber of Lime class
 	 */
 	template <typename Curve>
-	Lime<Curve>::Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data)
-	: m_RNG{make_RNG()}, m_selfDeviceId{deviceId},
+	Lime<Curve>::Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<LimeMutex> &mutex)
+	: m_RNG{make_RNG()}, m_selfDeviceId{deviceId}, m_mutex{mutex},
 	m_Ik{}, m_Ik_loaded(false),
 	m_localStorage(std::move(localStorage)), m_db_Uid{0},
 	m_X3DH_post_data{X3DH_post_data}, m_X3DH_Server_URL{url},
@@ -160,6 +163,7 @@ namespace lime {
 		// internal_recipients is a vector duplicating the recipients one in the same order (ignoring the one with peerStatus set to fail)
 		// This allows fast copying of relevant information back to recipients when encryption is completed
 		std::vector<RecipientInfos<Curve>> internal_recipients{};
+		m_mutex->lock(); // While looking in live cache and DB if needed, lock the access
 		for (const auto &recipient : *recipients) {
 			// if the input recipient peerStatus is fail we must ignore it
 			// most likely: we're in a call after a key bundle fetch and this peer device does not have keys on the X3DH server
@@ -181,15 +185,19 @@ namespace lime {
 		/* try to load all the session that are not in cache and set the peer Device status for all recipients*/
 		std::vector<std::string> missing_devices{};
 		cache_DR_sessions(internal_recipients, missing_devices);
+		m_mutex->unlock();
 
 		/* If we are still missing session we must ask the X3DH server for key bundles */
 		if (missing_devices.size()>0) {
 			// create a new callbackUserData, it shall be then deleted in callback, store in all shared_ptr to input/output values needed to call this encrypt function
 			auto userData = make_shared<callbackUserData<Curve>>(this->shared_from_this(), callback, recipientUserId, recipients, plainMessage, cipherMessage, encryptionPolicy);
+			m_mutex->lock(); // make sure this test and its consequence cannot be tempered by multithread access
 			if (m_ongoing_encryption == nullptr) { // no ongoing asynchronous encryption process it
 				m_ongoing_encryption = userData;
+				m_mutex->unlock();
 			} else { // some one else is expecting X3DH server response, enqueue this request
 				m_encryption_queue.push(userData);
+				m_mutex->unlock();
 				return;
 			}
 			// retrieve bundles from X3DH server, when they arrive, it will run the X3DH initiation and create the DR sessions
@@ -197,7 +205,9 @@ namespace lime {
 			x3dh_protocol::buildMessage_getPeerBundles<Curve>(X3DHmessage, missing_devices);
 			postToX3DHServer(userData, X3DHmessage);
 		} else { // got everyone, encrypt
+			m_mutex->lock(); // lock during actual encryption
 			encryptMessage(internal_recipients, *plainMessage, *recipientUserId, m_selfDeviceId, *cipherMessage, encryptionPolicy);
+			m_mutex->unlock();
 			// move DR messages to the input/output structure, ignoring again the input with peerStatus set to fail
 			// so the index on the internal_recipients still matches the way we created it from recipients
 			size_t i=0;
@@ -210,10 +220,14 @@ namespace lime {
 			}
 			if (callback) callback(lime::CallbackReturn::success, "");
 			// is there no one in an asynchronous encryption process and do we have something in encryption queue to process
+			m_mutex->lock(); // lock while poping the encryption queue
 			if (m_ongoing_encryption == nullptr && !m_encryption_queue.empty()) { // may happend when an encryption was queued but session was created by a previously queued encryption request
 				auto userData = m_encryption_queue.front();
 				m_encryption_queue.pop(); // remove it from queue and do it
+				m_mutex->unlock();
 				encrypt(userData->recipientUserId, userData->recipients, userData->plainMessage, userData->encryptionPolicy, userData->cipherMessage, userData->callback);
+			} else {
+				m_mutex->unlock();
 			}
 		}
 	}
@@ -344,7 +358,7 @@ namespace lime {
 	 * @return a pointer to the LimeGeneric class allowing access to API declared in lime_lime.hpp
 	 */
 	std::shared_ptr<LimeGeneric> insert_LimeUser(const std::string &dbFilename, const std::string &deviceId, const std::string &url, const lime::CurveId curve, const uint16_t OPkInitialBatchSize,
-			const limeX3DHServerPostData &X3DH_post_data, const limeCallback &callback) {
+			const limeX3DHServerPostData &X3DH_post_data, const limeCallback &callback, std::shared_ptr<LimeMutex> &mutex) {
 		LIME_LOGI<<"Create Lime user "<<deviceId;
 		/* first check the requested curve is instanciable and return an exception if not */
 #ifndef EC25519_ENABLED
@@ -368,7 +382,7 @@ namespace lime {
 #ifdef EC25519_ENABLED
 				{
 					/* constructor will insert user in Db, if already present, raise an exception*/
-					auto lime_ptr = std::make_shared<Lime<C255>>(std::move(localStorage), deviceId, url, X3DH_post_data);
+					auto lime_ptr = std::make_shared<Lime<C255>>(std::move(localStorage), deviceId, url, X3DH_post_data, mutex);
 					lime_ptr->publish_user(callback, OPkInitialBatchSize);
 					return lime_ptr;
 				}
@@ -378,7 +392,7 @@ namespace lime {
 				case lime::CurveId::c448 :
 #ifdef EC448_ENABLED
 				{
-					auto lime_ptr = std::make_shared<Lime<C448>>(std::move(localStorage), deviceId, url, X3DH_post_data);
+					auto lime_ptr = std::make_shared<Lime<C448>>(std::move(localStorage), deviceId, url, X3DH_post_data, mutex);
 					lime_ptr->publish_user(callback, OPkInitialBatchSize);
 					return lime_ptr;
 				}
@@ -407,7 +421,7 @@ namespace lime {
 	 *
 	 * @return a pointer to the LimeGeneric class allowing access to API declared in lime_lime.hpp
 	 */
-	std::shared_ptr<LimeGeneric> load_LimeUser(const std::string &dbFilename, const std::string &deviceId, const limeX3DHServerPostData &X3DH_post_data) {
+	std::shared_ptr<LimeGeneric> load_LimeUser(const std::string &dbFilename, const std::string &deviceId, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<LimeMutex> &mutex) {
 
 		/* open DB and load user */
 		auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilename)); // create as unique ptr, ownership is then passed to the Lime structure when instanciated
@@ -435,14 +449,14 @@ namespace lime {
 			switch (curve) {
 				case lime::CurveId::c25519 :
 #ifdef EC25519_ENABLED
-					return std::make_shared<Lime<C255>>(std::move(localStorage), deviceId, x3dh_server_url, X3DH_post_data, Uid);
+					return std::make_shared<Lime<C255>>(std::move(localStorage), deviceId, x3dh_server_url, X3DH_post_data, Uid, mutex);
 #endif
 				break;
 
 				case lime::CurveId::c448 :
 #ifdef EC448_ENABLED
 
-					return std::make_shared<Lime<C448>>(std::move(localStorage), deviceId, x3dh_server_url, X3DH_post_data, Uid);
+					return std::make_shared<Lime<C448>>(std::move(localStorage), deviceId, x3dh_server_url, X3DH_post_data, Uid, mutex);
 #endif
 				break;
 

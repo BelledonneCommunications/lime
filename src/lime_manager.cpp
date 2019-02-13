@@ -23,20 +23,35 @@
 #include "lime_lime.hpp"
 #include "lime_localStorage.hpp"
 #include "lime_settings.hpp"
+#include "lime_mutex.hpp"
+#include "bctoolbox/exception.hh"
 
 using namespace::std;
 
 namespace lime {
-	void LimeManager::load_user(std::shared_ptr<LimeGeneric> &user, const std::string &localDeviceId) {
-		// Load user object
-		auto userElem = m_users_cache.find(localDeviceId);
-		if (userElem == m_users_cache.end()) { // not in cache, load it from DB
-			user = load_LimeUser(m_db_access, localDeviceId, m_X3DH_post_data);
-			m_users_cache[localDeviceId]=user;
-		} else {
-			user = userElem->second;
-		}
+	LimeManager::LimeManager(const std::string &db_access, const limeX3DHServerPostData &X3DH_post_data, const bool multithread)
+		: m_users_cache{}, m_db_access{db_access}, m_X3DH_post_data{X3DH_post_data}, m_mutex{std::make_shared<LimeMutex>(multithread)} { }
 
+	void LimeManager::load_user(std::shared_ptr<LimeGeneric> &user, const std::string &localDeviceId) {
+		try {
+			m_mutex->lock();
+			// Load user object
+			auto userElem = m_users_cache.find(localDeviceId);
+			if (userElem == m_users_cache.end()) { // not in cache, load it from DB
+				user = load_LimeUser(m_db_access, localDeviceId, m_X3DH_post_data, m_mutex);
+				m_users_cache[localDeviceId]=user;
+			} else {
+				user = userElem->second;
+			}
+			m_mutex->unlock();
+		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
+			m_mutex->unlock();
+			throw e;
+		} catch (exception const &e) { // catch all and let flow it up
+			m_mutex->unlock();
+			// just leave the exception flow up
+			throw e;
+		}
 	}
 
 	/****************************************************************************/
@@ -61,7 +76,7 @@ namespace lime {
 			}
 		});
 
-		m_users_cache.insert({localDeviceId, insert_LimeUser(m_db_access, localDeviceId, x3dhServerUrl, curve, OPkInitialBatchSize, m_X3DH_post_data, managerCreateCallback)});
+		m_users_cache.insert({localDeviceId, insert_LimeUser(m_db_access, localDeviceId, x3dhServerUrl, curve, OPkInitialBatchSize, m_X3DH_post_data, managerCreateCallback, m_mutex)});
 	}
 
 	void LimeManager::delete_user(const std::string &localDeviceId, const limeCallback &callback) {
