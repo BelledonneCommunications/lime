@@ -275,6 +275,19 @@ struct jLimeManager {
 		}
 	}
 
+	jni::jboolean is_user(jni::JNIEnv &env, const jni::String &localDeviceId ) {
+		try {
+			if (m_manager->is_user(jni::Make<std::string>(env, localDeviceId))) {
+				return JNI_TRUE;
+			} else {
+				return JNI_FALSE;
+			}
+		} catch (std::exception const &e) { // catch anything, BctbxException are managed in is_user, so there is a real problem if we get there.
+			ThrowJavaLimeException(env, e.what());
+			return JNI_FALSE;
+		}
+	}
+
 	void encrypt(jni::JNIEnv &env,  const jni::String &jlocalDeviceId,  const jni::String &jrecipientUserId, jni::Array<jni::Object<jRecipientData>> &jrecipients,
 			jni::Array<jni::jbyte> &jplainMessage,
 			jni::Object<jLimeOutputBuffer> &jcipherMessage,
@@ -456,6 +469,28 @@ struct jLimeManager {
 	void delete_peerDevice(jni::JNIEnv &env, const jni::String &jpeerDeviceId) {
 		m_manager->delete_peerDevice(jni::Make<std::string>(env, jpeerDeviceId));
 	}
+
+	void set_x3dhServerUrl(jni::JNIEnv &env, const jni::String &jlocalDeviceId, const jni::String &jx3dhServerUrl) {
+		try {
+			m_manager->set_x3dhServerUrl(jni::Make<std::string>(env, jlocalDeviceId), jni::Make<std::string>(env, jx3dhServerUrl));
+		} catch (BctbxException const &e) {
+			ThrowJavaLimeException(env, e.str());
+		} catch (std::exception const &e) { // catch anything
+			ThrowJavaLimeException(env, e.what());
+		}
+	}
+
+	jni::Local<jni::String> get_x3dhServerUrl(jni::JNIEnv &env, const jni::String &jlocalDeviceId) {
+		std::string url{};
+		try {
+			url = m_manager->get_x3dhServerUrl(jni::Make<std::string>(env, jlocalDeviceId));
+		} catch (BctbxException const &e) {
+			ThrowJavaLimeException(env, e.str());
+		} catch (std::exception const &e) { // catch anything
+			ThrowJavaLimeException(env, e.what());
+		}
+		return jni::Make<jni::String>(env, url);
+	}
 };
 
 #define METHOD(MethodPtr, name) jni::MakeNativePeerMethod<decltype(MethodPtr), (MethodPtr)>(name)
@@ -466,6 +501,7 @@ jni::RegisterNativePeer<jLimeManager>(env, jni::Class<jLimeManager>::Find(env), 
 	"nativeDestructor",
 	METHOD(&jLimeManager::create_user, "n_create_user"),
 	METHOD(&jLimeManager::delete_user, "delete_user"),
+	METHOD(&jLimeManager::is_user, "is_user"),
 	METHOD(&jLimeManager::encrypt, "n_encrypt"),
 	METHOD(&jLimeManager::decrypt, "n_decrypt"),
 	METHOD(&jLimeManager::update, "n_update"),
@@ -473,7 +509,9 @@ jni::RegisterNativePeer<jLimeManager>(env, jni::Class<jLimeManager>::Find(env), 
 	METHOD(&jLimeManager::set_peerDeviceStatus_Ik, "n_set_peerDeviceStatus_Ik"),
 	METHOD(&jLimeManager::set_peerDeviceStatus, "n_set_peerDeviceStatus"),
 	METHOD(&jLimeManager::get_peerDeviceStatus, "n_get_peerDeviceStatus"),
-	METHOD(&jLimeManager::delete_peerDevice, "delete_peerDevice")
+	METHOD(&jLimeManager::delete_peerDevice, "delete_peerDevice"),
+	METHOD(&jLimeManager::set_x3dhServerUrl, "set_x3dhServerUrl"),
+	METHOD(&jLimeManager::get_x3dhServerUrl, "get_x3dhServerUrl")
 	);
 
 // bind the process_response to the static java LimeManager.process_response method

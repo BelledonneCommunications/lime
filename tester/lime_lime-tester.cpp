@@ -40,6 +40,16 @@ using namespace::lime;
 
 static belle_sip_stack_t *bc_stack=NULL;
 static belle_http_provider_t *prov=NULL;
+/**
+ * An enumeration to control simulated http transmission failure
+ */
+enum class HttpLinkStatus : uint8_t {
+	ok,
+	sending_fail,
+	reception_fail
+};
+
+static HttpLinkStatus httpLink = HttpLinkStatus::ok;
 
 static int http_before_all(void) {
 	bc_stack=belle_sip_stack_new(NULL);
@@ -130,6 +140,32 @@ static limeX3DHServerPostData X3DHServerPost([](const std::string &url, const st
 	belle_http_provider_send_request(prov,req,l);
 });
 
+/** @brief Post data to X3DH server: use the previous function but is able to simulate emission or reception failure.
+ * uses the httpLink global variable to simulate transmission error:
+ *
+ *
+ * @param[in] url		The URL of X3DH server
+ * @param[in] from		The local device id, used to identify user on the X3DH server, user identification and credential verification is out of lib lime scope.
+ * 				Here identification is performed on test server via belle-sip authentication mechanism and providing the test user credentials
+ * @param[in] message		The data to be sent to the X3DH server
+ * @param[in] responseProcess	The function to be called when response from server arrives. Function prototype is defined in lime.hpp: (void)(int responseCode, std::vector<uint8_t>response)
+ */
+static limeX3DHServerPostData X3DHServerPost_Failing_Simulation([](const std::string &url, const std::string &from, const std::vector<uint8_t> &message, const limeX3DHServerResponseProcess &responseProcess){
+	switch (httpLink) {
+		case HttpLinkStatus::reception_fail :
+			X3DHServerPost(url, from, message, [](int response_code, const std::vector<uint8_t> &responseBody){
+					// This is a dummy responseProcessing, just swallow the server answer and do nothing
+					});
+		break;
+		case HttpLinkStatus::sending_fail :
+			// Just do nothing, swallow the packet and do not give any answer.
+		break;
+		case HttpLinkStatus::ok :
+		default:
+			X3DHServerPost(url, from, message, responseProcess);
+		break;
+	}
+});
 
 /* This function will destroy and recreate managers given in parameter, force deleting all internal cache and start back from what is in local Storage */
 static void managersClean(std::unique_ptr<LimeManager> &alice, std::unique_ptr<LimeManager> &bob, std::string aliceDb, std::string bobDb) {
@@ -1621,6 +1657,103 @@ static void lime_update_clean_MK() {
 #endif
 }
 
+/**
+ * Scenario:
+ * - Create Alice and Bob users
+ * - Backup local Alice DB.
+ * - Delete Alice user (so it is not anymore on the server)
+ * - restore local Alice DB and do an update, it shall republish the user on server(using new OPks)
+ * - Bob encrypt a message to Alice, it shall work as the user has been republished
+ * - Alice decrypt just to be sure we're good with the OPks
+ */
+static void lime_update_republish_test(const lime::CurveId curve, const std::string &dbBaseFilename, const std::string &x3dh_server_url) {
+	// create DB
+	std::string dbFilenameAlice{dbBaseFilename};
+	std::string dbFilenameAliceBackup{dbBaseFilename};
+	dbFilenameAlice.append(".alice.").append((curve==CurveId::c25519)?"C25519":"C448").append(".sqlite3");
+	dbFilenameAliceBackup.append(".alice.backup.").append((curve==CurveId::c25519)?"C25519":"C448").append(".sqlite3");
+	std::string dbFilenameBob{dbBaseFilename};
+	dbFilenameBob.append(".bob.").append((curve==CurveId::c25519)?"C25519":"C448").append(".sqlite3");
+
+	remove(dbFilenameAlice.data()); // delete the database file if already exists
+	remove(dbFilenameAliceBackup.data()); // delete the database file if already exists
+	remove(dbFilenameBob.data()); // delete the database file if already exists
+
+	lime_tester::events_counters_t counters={};
+	int expected_success=0;
+
+	limeCallback callback([&counters](lime::CallbackReturn returnCode, std::string anythingToSay) {
+					if (returnCode == lime::CallbackReturn::success) {
+						counters.operation_success++;
+					} else {
+						counters.operation_failed++;
+						LIME_LOGE<<"Lime operation failed : "<<anythingToSay;
+					}
+				});
+
+	try {
+		// create Managers and devices for alice and Bob
+		auto aliceManager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost));
+		auto aliceDeviceId = lime_tester::makeRandomDeviceName("alice.");
+		aliceManager->create_user(*aliceDeviceId, x3dh_server_url, curve,  lime_tester::OPkInitialBatchSize, callback);
+		auto bobManager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameBob, X3DHServerPost));
+		auto bobDeviceId = lime_tester::makeRandomDeviceName("bob.");
+		bobManager->create_user(*bobDeviceId, x3dh_server_url, curve,  lime_tester::OPkInitialBatchSize, callback);
+		expected_success += 2;
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success, expected_success,lime_tester::wait_for_timeout));
+
+		// Backup Alice Database
+		std::ifstream  src(dbFilenameAlice, std::ios::binary);
+		std::ofstream  dst(dbFilenameAliceBackup,   std::ios::binary);
+		dst << src.rdbuf();
+		src.close();
+		dst.close();
+
+		// Delete Alice user
+		aliceManager->delete_user(*aliceDeviceId, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success, ++expected_success,lime_tester::wait_for_timeout));
+		// Start a new manager using the backuped local base, so the user is present in local but no more on remote
+		aliceManager = nullptr;
+		aliceManager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAliceBackup, X3DHServerPost));
+		// Update: that shall set all current OPk as dispatched, create a new batch of default creation size and republish the user on server
+		aliceManager->update(callback, lime_tester::OPkInitialBatchSize, lime_tester::OPkInitialBatchSize);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success, ++expected_success,lime_tester::wait_for_timeout));
+		// Bob encrypt a message to Alice, it will fetch keys from server
+		auto bobRecipients = make_shared<std::vector<RecipientData>>();
+		bobRecipients->emplace_back(*aliceDeviceId);
+		auto bobMessage = make_shared<const std::vector<uint8_t>>(lime_tester::messages_pattern[0].begin(), lime_tester::messages_pattern[0].end());
+		auto bobCipherMessage = make_shared<std::vector<uint8_t>>();
+		bobManager->encrypt(*bobDeviceId, make_shared<const std::string>("alice"), bobRecipients, bobMessage, bobCipherMessage, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+		// Alice decrypt
+		std::vector<uint8_t> receivedMessage{};
+		BC_ASSERT_TRUE(aliceManager->decrypt(*aliceDeviceId, "alice", *bobDeviceId, (*bobRecipients)[0].DRmessage, *bobCipherMessage, receivedMessage) == lime::PeerDeviceStatus::unknown);
+		auto receivedMessageString = std::string{receivedMessage.begin(), receivedMessage.end()};
+		BC_ASSERT_TRUE(receivedMessageString == lime_tester::messages_pattern[0]);
+
+		if (cleanDatabase) {
+			aliceManager->delete_user(*aliceDeviceId, callback);
+			bobManager->delete_user(*bobDeviceId, callback);
+			BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success+2,lime_tester::wait_for_timeout));
+			remove(dbFilenameAlice.data());
+			remove(dbFilenameAliceBackup.data());
+			remove(dbFilenameBob.data());
+		}
+	} catch (BctbxException &e) {
+		LIME_LOGE << e;
+		BC_FAIL("");
+	}
+}
+
+
+static void lime_update_republish() {
+#ifdef EC25519_ENABLED
+	lime_update_republish_test(lime::CurveId::c25519, "lime_update_republish", std::string("https://").append(lime_tester::test_x3dh_server_url).append(":").append(lime_tester::test_x3dh_c25519_server_port).data());
+#endif
+#ifdef EC448_ENABLED
+	lime_update_republish_test(lime::CurveId::c448, "lime_update_republish", std::string("https://").append(lime_tester::test_x3dh_server_url).append(":").append(lime_tester::test_x3dh_c448_server_port).data());
+#endif
+}
 /** Scenario
  * - Create one device for alice
  * - Create OPk_batch_size devices for bob, they will all fetch a key and encrypt a messaage to alice, server shall not have anymore OPks
@@ -2767,6 +2900,7 @@ static void x3dh_user_not_found_test(const lime::CurveId curve, const std::strin
 
 	lime_tester::events_counters_t counters={};
 	int expected_success=0;
+	int expected_fail=0;
 
 	limeCallback callback([&counters](lime::CallbackReturn returnCode, std::string anythingToSay) {
 					if (returnCode == lime::CallbackReturn::success) {
@@ -2807,8 +2941,8 @@ static void x3dh_user_not_found_test(const lime::CurveId curve, const std::strin
 		auto cipherMessage = make_shared<std::vector<uint8_t>>();
 
 		aliceManager->encrypt(*aliceDevice1, make_shared<const std::string>("bob"), recipients, message, cipherMessage, callback);
-		// The encryption shall run without error
-		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+		// The encryption shall return an error: no recipient device could get a key
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_failed,++expected_fail,lime_tester::wait_for_timeout));
 		// but the status of the recipient disclose the failure on that one
 		BC_ASSERT_TRUE((*recipients)[0].peerStatus == lime::PeerDeviceStatus::fail);
 
@@ -3072,14 +3206,34 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 	auto mutex = std::make_shared<LimeMutex>(false);
 
 	try {
+		/*Check if Alice exists in the database */
+		BC_ASSERT_FALSE(Manager->is_user(*aliceDeviceName));
+
 		/* create a user in a fresh database */
 		Manager->create_user(*aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback);
 		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
 		if (counters.operation_failed == 1) return; // skip the end of the test if we can't do this
 
+		/*Check if Alice exists in the database */
+		BC_ASSERT_TRUE(Manager->is_user(*aliceDeviceName));
+
 		/* load alice from from DB */
 		auto alice = load_LimeUser(dbFilenameAlice, *aliceDeviceName, X3DHServerPost, mutex);
 		/* no need to wait here, it shall load alice immediately */
+
+		// Get alice x3dh server url
+		BC_ASSERT_TRUE(Manager->get_x3dhServerUrl(*aliceDeviceName) == x3dh_server_url);
+
+		// Set the X3DH URL server to something else and check it worked
+		Manager->set_x3dhServerUrl(*aliceDeviceName, "https://testing.testing:12345");
+		BC_ASSERT_TRUE(Manager->get_x3dhServerUrl(*aliceDeviceName) == "https://testing.testing:12345");
+		// Force a reload of data from local storage just to be sure the modification was perform correctly
+		Manager = nullptr;
+		Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost));
+		BC_ASSERT_TRUE(Manager->is_user(*aliceDeviceName)); // Check again just after LimeManager reload that Alice is in local storage
+		BC_ASSERT_TRUE(Manager->get_x3dhServerUrl(*aliceDeviceName) == "https://testing.testing:12345");
+		// Set it back to the regular one to be able to complete the test
+		Manager->set_x3dhServerUrl(*aliceDeviceName, x3dh_server_url);
 	} catch (BctbxException &e) {
 		LIME_LOGE << e;
 		BC_FAIL("");
@@ -3179,9 +3333,174 @@ static void user_management(void) {
 #endif
 }
 
+/**
+ * Scenario:
+ *  - Create a user in local DB but do not send any message to the X3DH server
+ *  - Check the user is there and inactive then delete it from local only
+ *  - Create the same user with different keys on both local and server to check server didn't get it in the first place
+ *  - Clean DBs (local and remote)
+ *  - Repeat the previous 3 steps but let the message reach the server this time. At the second creation we shall get a fail from server as we are creating again a user but with different keys
+ *  - Clean DBs (local and remote)
+ *  - Create a local user but do not send anything to the server
+ *  - Create it again letting the message go, it shall be a success
+ *  - Clean DBs (local and remote)
+ *  - Create a user but discard the response from server (so it is stored as inactive)
+ *  - Create it again with normal connectivity, server is happy as we get the same Ik and SPk, user is activated on local base
+ */
+static void user_registration_failure_test(const lime::CurveId curve, const std::string &dbBaseFilename, const std::string &x3dh_server_url ) {
+
+	std::string dbFilenameAlice{dbBaseFilename};
+	dbFilenameAlice.append(".alice.").append((curve==CurveId::c25519)?"C25519":"C448").append(".sqlite3");
+
+	remove(dbFilenameAlice.data()); // delete the database file if already exists
+
+	lime_tester::events_counters_t counters={};
+	int expected_success=0;
+	int expected_failed=0;
+	// reset the global setting for Http Link
+	httpLink = HttpLinkStatus::ok;
+
+	limeCallback callback([&counters](lime::CallbackReturn returnCode, std::string anythingToSay) {
+					if (returnCode == lime::CallbackReturn::success) {
+						counters.operation_success++;
+					} else {
+						counters.operation_failed++;
+						LIME_LOGI <<"Insert Lime user failed : "<< anythingToSay.data() ;
+					}
+				});
+	// we need a LimeManager
+	auto Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost_Failing_Simulation));
+	auto aliceDeviceId = lime_tester::makeRandomDeviceName("alice.");
+
+	try {
+		/* create a user in a fresh database but discard the message to server */
+		httpLink = HttpLinkStatus::sending_fail;
+		Manager->create_user(*aliceDeviceId, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback);
+		BC_ASSERT_FALSE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success+1,lime_tester::wait_for_timeout));
+		BC_ASSERT_TRUE(counters.operation_failed == expected_failed); // We shall have no failure either, the server never answer so the callback is never called (in a real situation the timeout on answer may be forwarded to the lime engine)
+		Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost_Failing_Simulation)); // reload manager from db after the timeout
+	} catch (BctbxException &e) {
+		LIME_LOGE << e;
+		BC_FAIL("");
+	}
+
+	bool gotExpectedException = false;
+	long int Uid=0;
+	try {
+		/* now we have the user in local base but not active and not in remote, lets check that */
+		/* load alice from DB(using insider functions) : user is not active, we shall get an exception */
+		auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilenameAlice));
+		auto curve = CurveId::unset;
+		std::string x3dh_server_url;
+
+		localStorage->load_LimeUser(*aliceDeviceId, Uid, curve, x3dh_server_url); // this one will throw an exception if user is not found, just let it rise
+	} catch (BctbxException &e) {
+		gotExpectedException = true;
+	}
+	BC_ASSERT(Uid == -1); // when user is not active, the db::load_LimeUser set the Uid to -1 before generating the exception
+	BC_ASSERT(gotExpectedException == true);
+
+	try {
+		// Delete local user from base and create it letting it flow to the server
+		httpLink = HttpLinkStatus::sending_fail; // make sure our delete never reach the server
+		Manager->delete_user(*aliceDeviceId, callback);
+		BC_ASSERT_FALSE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success+1,lime_tester::wait_for_timeout));
+		Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost_Failing_Simulation)); // reload manager from db after the timeout
+		BC_ASSERT_TRUE(counters.operation_failed == expected_failed);
+		httpLink = HttpLinkStatus::ok; // restore htpp link
+		Manager->create_user(*aliceDeviceId, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback); // This one has different keys but the same user Id
+		// if this userId was already registered on server(with the old Ik) we would have an error
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+		// and delete it again
+		Manager->delete_user(*aliceDeviceId, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+
+
+		// Start again but this time let the message flow to the server, just block the answer
+		httpLink = HttpLinkStatus::reception_fail;
+		Manager->create_user(*aliceDeviceId, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback);
+		BC_ASSERT_FALSE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success+1,lime_tester::wait_for_timeout));
+		BC_ASSERT_TRUE(counters.operation_failed == expected_failed); // We shall have no failure either, the server never answer so the callback is never called (in a real situation the timeout on answer may be forwarded to the lime engine)
+		Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost_Failing_Simulation)); // reload manager from db after the timeout
+
+		// Now we have the user inactive in local but set on server. Delete the local one
+		httpLink = HttpLinkStatus::sending_fail; // make sure our delete never reach the server
+		Manager->delete_user(*aliceDeviceId, callback);
+		BC_ASSERT_FALSE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success+1,lime_tester::wait_for_timeout));
+		Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost_Failing_Simulation)); // reload manager from db after the timeout
+		httpLink = HttpLinkStatus::ok; // restore htpp link
+		Manager->create_user(*aliceDeviceId, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback); // This one has different keys but the same user Id
+		// this userId is already registered on server(with the old Ik) we shall have an error -> the error is deleted from local base
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_failed,++expected_failed,lime_tester::wait_for_timeout));
+		// Now the user is on the server but no more in local, to delete it from server, we must create it in local only and then delete
+		httpLink = HttpLinkStatus::sending_fail; // make sure our delete never reach the server
+		Manager->create_user(*aliceDeviceId, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback);
+		BC_ASSERT_FALSE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success+1,lime_tester::wait_for_timeout));
+		BC_ASSERT_TRUE(counters.operation_failed == expected_failed); // We shall have no failure either, the server never answer so the callback is never called (in a real situation the timeout on answer may be forwarded to the lime engine)
+		Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost_Failing_Simulation)); // reload manager from db after the timeout
+		httpLink = HttpLinkStatus::ok; // restore htpp link
+		Manager->delete_user(*aliceDeviceId, callback); // delete from local and remote
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+
+		// Create again on local only, and then call the create_user again with the same id, with restored connectivity to get an active user
+		httpLink = HttpLinkStatus::sending_fail; // make sure our delete never reach the server
+		Manager->create_user(*aliceDeviceId, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback);
+		BC_ASSERT_FALSE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success+1,lime_tester::wait_for_timeout));
+		BC_ASSERT_TRUE(counters.operation_failed == expected_failed); // We shall have no failure either, the server never answer so the callback is never called (in a real situation the timeout on answer may be forwarded to the lime engine)
+		Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost_Failing_Simulation)); // reload manager from db after the timeout
+		// create one more time, it shall this time publish on the server without error
+		httpLink = HttpLinkStatus::ok; // restore htpp link
+		Manager->create_user(*aliceDeviceId, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+
+		// Clean
+		Manager->delete_user(*aliceDeviceId, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+
+		// Same than previous but this time we block the server answer and then call again create
+		httpLink = HttpLinkStatus::reception_fail; // make sure our delete never reach the server
+		Manager->create_user(*aliceDeviceId, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback);
+		BC_ASSERT_FALSE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success+1,lime_tester::wait_for_timeout));
+		BC_ASSERT_TRUE(counters.operation_failed == expected_failed); // We shall have no failure either, the server never answer so the callback is never called (in a real situation the timeout on answer may be forwarded to the lime engine)
+		Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost_Failing_Simulation)); // reload manager from db after the timeout
+		// create one more time, it shall this time publish on the server without error
+		httpLink = HttpLinkStatus::ok; // restore htpp link
+		Manager->create_user(*aliceDeviceId, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+
+	} catch (BctbxException &e) {
+		LIME_LOGE << e;
+		BC_FAIL("");
+	}
+
+	try {
+		if (cleanDatabase) {
+			// delete Alice, wait for callback confirmation from server
+			httpLink = HttpLinkStatus::ok; // restore http link functionality
+			Manager->delete_user(*aliceDeviceId, callback);
+			BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+			remove(dbFilenameAlice.data()); // delete the database file
+		}
+	} catch (BctbxException &e) {
+		LIME_LOGE << e;
+		BC_FAIL("");
+	}
+}
+
+static void user_registration_failure(void) {
+#ifdef EC25519_ENABLED
+	user_registration_failure_test(lime::CurveId::c25519, "lime_user_management", std::string("https://").append(lime_tester::test_x3dh_server_url).append(":").append(lime_tester::test_x3dh_c25519_server_port).data());
+#endif
+#ifdef EC448_ENABLED
+	user_registration_failure_test(lime::CurveId::c448, "lime_user_management", std::string("https://").append(lime_tester::test_x3dh_server_url).append(":").append(lime_tester::test_x3dh_c448_server_port).data());
+#endif
+}
+
+
 static test_t tests[] = {
-	TEST_NO_TAG("User Management", user_management),
 	TEST_NO_TAG("Basic", x3dh_basic),
+	TEST_NO_TAG("User Management", user_management),
+	TEST_NO_TAG("User registration failure", user_registration_failure),
 	TEST_NO_TAG("User not found", x3dh_user_not_found),
 	TEST_NO_TAG("Queued encryption", x3dh_operation_queue),
 	TEST_NO_TAG("Multi devices queued encryption", x3dh_multidev_operation_queue),
@@ -3191,6 +3510,7 @@ static test_t tests[] = {
 	TEST_NO_TAG("Update - clean MK", lime_update_clean_MK),
 	TEST_NO_TAG("Update - SPk", lime_update_SPk),
 	TEST_NO_TAG("Update - OPk", lime_update_OPk),
+	TEST_NO_TAG("Update - Republish", lime_update_republish),
 	TEST_NO_TAG("get self Identity Key", lime_getSelfIk),
 	TEST_NO_TAG("Verified Status", lime_identityVerifiedStatus),
 	TEST_NO_TAG("Peer Device Status", lime_peerDeviceStatus),

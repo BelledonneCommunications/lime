@@ -142,6 +142,20 @@ namespace lime {
 		*/
 		virtual void get_Ik(std::vector<uint8_t> &Ik) = 0;
 
+		/**
+		 * @brief Set the X3DH key server URL for this identified user
+		 *
+		 * @param[in]	x3dhServerUrl		The complete url(including port) of the X3DH key server
+		 */
+		virtual void set_x3dhServerUrl(const std::string &x3dhServerUrl) = 0;
+
+		/**
+		 * @brief Get the X3DH key server URL for this identified user
+		 *
+		 * @return The complete url(including port) of the X3DH key server
+		 */
+		virtual std::string get_x3dhServerUrl() = 0;
+
 		virtual ~LimeGeneric() {};
 	};
 
@@ -150,7 +164,7 @@ namespace lime {
 	std::shared_ptr<LimeGeneric> insert_LimeUser(const std::string &dbFilename, const std::string &deviceId, const std::string &url, const lime::CurveId curve, const uint16_t OPkInitialBatchSize,
 			const limeX3DHServerPostData &X3DH_post_data, const limeCallback &callback, std::shared_ptr<LimeMutex> &mutex);
 
-	std::shared_ptr<LimeGeneric> load_LimeUser(const std::string &dbFilename, const std::string &deviceId, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<LimeMutex> &mutex);
+	std::shared_ptr<LimeGeneric> load_LimeUser(const std::string &dbFilename, const std::string &deviceId, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<LimeMutex> &mutex, const bool allStatus=false);
 
 }
 #endif // lime_lime_hpp

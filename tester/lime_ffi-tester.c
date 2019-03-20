@@ -550,6 +550,8 @@ static void freeRecipientBuffers(lime_ffi_RecipientData_t *recipients, size_t re
  * if continuousSession is set to false, delete and recreate LimeManager before each new operation to force relying on local Storage
  */
 static void ffi_basic_test(const enum lime_ffi_CurveId curve, const char *dbBaseFilename, const char *x3dh_server_url, const uint8_t continuousSession) {
+	char serverUrl[256]; // needed to test set/get x3dh url server functionnality
+	size_t serverUrlSize = sizeof(serverUrl);
 	/* users databases names: baseFilename.<alice/bob>.<curve id>.sqlite3 */
 	char dbFilenameAlice[512];
 	char dbFilenameBob1[512];
@@ -582,6 +584,9 @@ static void ffi_basic_test(const enum lime_ffi_CurveId curve, const char *dbBase
 	lime_ffi_manager_init(&bobManager1, dbFilenameBob1, X3DHServerPost, NULL);
 	lime_ffi_manager_init(&bobManager2, dbFilenameBob2, X3DHServerPost, NULL);
 
+	/*** Check if Alice exists in the database ***/
+	BC_ASSERT_TRUE(lime_ffi_is_user(aliceManager, aliceDeviceId) == LIME_FFI_USER_NOT_FOUND);
+
 	/*** create users ***/
 	lime_ffi_create_user(aliceManager, aliceDeviceId, x3dh_server_url, curve, ffi_defaultInitialOPkBatchSize, statusCallback, NULL);
 	lime_ffi_create_user(bobManager1, bobDeviceId1, x3dh_server_url, curve, ffi_defaultInitialOPkBatchSize, statusCallback, NULL);
@@ -597,6 +602,39 @@ static void ffi_basic_test(const enum lime_ffi_CurveId curve, const char *dbBase
 		managerClean(&bobManager2, dbFilenameBob2);
 	}
 
+	/*** Check the device we created exists in DB ***/
+	BC_ASSERT_TRUE(lime_ffi_is_user(aliceManager, aliceDeviceId) == LIME_FFI_SUCCESS);
+	BC_ASSERT_TRUE(lime_ffi_is_user(bobManager1, bobDeviceId1) == LIME_FFI_SUCCESS);
+	BC_ASSERT_TRUE(lime_ffi_is_user(bobManager2, bobDeviceId2) == LIME_FFI_SUCCESS);
+
+	/*** Set/Get X3DH server URL functionality checks ***/
+	/* Get alice x3dh server url */
+	serverUrlSize = sizeof(serverUrl);
+	lime_ffi_get_x3dhServerUrl(aliceManager, aliceDeviceId, serverUrl, &serverUrlSize);
+	BC_ASSERT_TRUE(strcmp(serverUrl, x3dh_server_url) == 0);
+	serverUrl[0]='\0'; // clean the serverUrl char buffer
+
+	// Set the X3DH URL server to something else and check it worked
+	lime_ffi_set_x3dhServerUrl(aliceManager, aliceDeviceId, "https://testing.testing:12345");
+	serverUrlSize = sizeof(serverUrl);
+	lime_ffi_get_x3dhServerUrl(aliceManager, aliceDeviceId, serverUrl, &serverUrlSize);
+	BC_ASSERT_TRUE(strcmp(serverUrl,"https://testing.testing:12345") == 0);
+	// Force a reload of data from local storage just to be sure the modification was perform correctly
+	managerClean(&aliceManager, dbFilenameAlice);
+	serverUrl[0]='\0';
+	serverUrlSize = sizeof(serverUrl);
+	lime_ffi_get_x3dhServerUrl(aliceManager, aliceDeviceId, serverUrl, &serverUrlSize);
+	BC_ASSERT_TRUE(strcmp(serverUrl,"https://testing.testing:12345") == 0);
+	// Set it back to the regular one to be able to complete the test
+	lime_ffi_set_x3dhServerUrl(aliceManager, aliceDeviceId, x3dh_server_url);
+
+
+	/* respawn managers from cache if requested */
+	if (!continuousSession) {
+		managerClean(&aliceManager, dbFilenameAlice);
+		managerClean(&bobManager1, dbFilenameBob1);
+		managerClean(&bobManager2, dbFilenameBob2);
+	}
 
 	/*** encrypt 2 messages to Bob at the same time, do not wait for one to be finished to encrypt the second one ***/
 	/*  prepare the data: alloc memory for the recipients data */

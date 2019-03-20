@@ -129,7 +129,7 @@ namespace lime {
 			std::unordered_map<std::string, std::shared_ptr<LimeGeneric>> m_users_cache; // cache of already opened Lime Session, identified by user Id (GRUU)
 			std::string m_db_access; // DB access information forwarded to SOCI to correctly access database
 			limeX3DHServerPostData m_X3DH_post_data; // send data to the X3DH key server
-			void load_user(std::shared_ptr<LimeGeneric> &user, const std::string &localDeviceId); // helper function, get from m_users_cache of local Storage the requested Lime object
+			void load_user(std::shared_ptr<LimeGeneric> &user, const std::string &localDeviceId, const bool allStatus=false); // helper function, get from m_users_cache of local Storage the requested Lime object
 			std::shared_ptr<LimeMutex> m_mutex; // manage multithreading - mostly db-access.
 
 		public :
@@ -141,9 +141,9 @@ namespace lime {
 			 * 	A user is identified by its deviceId (shall be the GRUU) and must at creation select a base Elliptic curve to use, this setting cannot be changed later
 			 * 	A user is published on an X3DH key server who must run using the same elliptic curve selected for this user (creation will fail otherwise), the server url cannot be changed later
 			 *
-			 * @param[in]	localDeviceId		Identify the local user acount to use, it must be unique and is also be used as Id on the X3DH key server, it shall be the GRUU
+			 * @param[in]	localDeviceId		Identify the local user account, it must be unique and is also be used as Id on the X3DH key server, it shall be the GRUU
 			 * @param[in]	x3dhServerUrl		The complete url(including port) of the X3DH key server. It must connect using HTTPS. Example: https://sip5.linphone.org:25519
-			 * @param[in]	curve			Choice of elliptic curve to use as base for ECDH and EdDSA operation involved. Can be CurveId::c25519 or CurveId::c448.
+			 * @param[in]	curve			Choice of elliptic curve used as base for ECDH and EdDSA operation involved. Can be CurveId::c25519 or CurveId::c448.
 			 * @param[in]	OPkInitialBatchSize	Number of OPks in the first batch uploaded to X3DH server
 			 * @param[in]	callback		This operation contact the X3DH server and is thus asynchronous, when server responds,
 			 * 					this callback will be called giving the exit status and an error message in case of failure
@@ -169,6 +169,15 @@ namespace lime {
 			void delete_user(const std::string &localDeviceId, const limeCallback &callback);
 
 			/**
+			 * @brief Check if a user is present and active in local storage
+			 *
+			 * @param[in]	localDeviceId	used to identify which local account looking up, shall be the GRUU
+			 *
+			 * @return true if the user is active in the local storage, false otherwise
+			 */
+			bool is_user(const std::string &localDeviceId);
+
+			/**
 			 * @brief Encrypt a buffer (text or file) for a given list of recipient devices
 			 *
 			 * if specified localDeviceId is not found in local Storage, throw an exception
@@ -189,7 +198,7 @@ namespace lime {
 			 * 	In all cases, the identified source of the message will be the localDeviceId
 			 *
 			 * 	If the X3DH server can't provide keys for a peer device, its status is set to fail and its DRmessage is empty. Other devices get their encrypted message
-			 * 	If no peer device could get encrypted for all of them are missing keys on the X3DH server, the callback will still be called with success exit status
+			 * 	If no peer device could get encrypted for all of them are missing keys on the X3DH server, the callback will be called with fail exit status
 			 *
 			 * @note nearly all parameters are shared pointers as the process being asynchronous, the ownership will be taken internally exempting caller to manage the buffers.
 			 *
@@ -330,6 +339,27 @@ namespace lime {
 			 * Call is silently ignored if the device is not found in local storage
 			 */
 			void delete_peerDevice(const std::string &peerDeviceId);
+
+			/**
+			 * @brief Set the X3DH key server URL for this identified user
+			 *
+			 * @param[in]	localDeviceId		Identify the local user account, it must be unique and is also be used as Id on the X3DH key server, it shall be the GRUU
+			 * @param[in]	x3dhServerUrl		The complete url(including port) of the X3DH key server. It must connect using HTTPS. Example: https://sip5.linphone.org:25519
+			 *
+			 * Throw an exception if the user is unknow or inactive
+			 */
+			void set_x3dhServerUrl(const std::string &localDeviceId, const std::string &x3dhServerUrl);
+
+			/**
+			 * @brief Get the X3DH key server URL for this identified user
+			 *
+			 * @param[in]	localDeviceId		Identify the local user account, it must be unique and is also be used as Id on the X3DH key server, it shall be the GRUU
+			 *
+			 * @return The complete url(including port) of the X3DH key server.
+			 *
+			 * Throw an exception if the user is unknow or inactive
+			 */
+			std::string get_x3dhServerUrl(const std::string &localDeviceId);
 
 			LimeManager() = delete; // no manager without Database and http provider
 			LimeManager(const LimeManager&) = delete; // no copy constructor

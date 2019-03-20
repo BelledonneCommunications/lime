@@ -52,7 +52,8 @@ enum LIME_FFI_ERROR {
 	LIME_FFI_SUCCESS = 0,
 	LIME_FFI_INVALID_CURVE_ARGUMENT = -1,
 	LIME_FFI_INTERNAL_ERROR = -2,
-	LIME_FFI_OUTPUT_BUFFER_TOO_SMALL = -3
+	LIME_FFI_OUTPUT_BUFFER_TOO_SMALL = -3,
+	LIME_FFI_USER_NOT_FOUND = -4
 };
 
 /** Identifies the elliptic curve used in lime, the values assigned are used in localStorage and X3DH server
@@ -203,6 +204,14 @@ int lime_ffi_create_user(lime_manager_t manager, const char *localDeviceId,
  */
 int lime_ffi_delete_user(lime_manager_t manager, const char *localDeviceId, const lime_ffi_Callback callback, void *callbackUserData);
 
+/**
+ * @brief Check if a user is present and active in local storage
+ *
+ * @param[in]	localDeviceId	used to identify which local account looking up, shall be the GRUU (Null terminated string)
+ *
+ * @return LIME_FFI_SUCCESS if the user is active in the local storage, LIME_FFI_USER_NOT_FOUND otherwise
+ */
+int lime_ffi_is_user(lime_manager_t manager, const char *localDeviceId);
 
 /**
  * @brief Compute the maximum buffer sizes for the encryption outputs: DRmessage and cipherMessage
@@ -237,7 +246,7 @@ int lime_ffi_encryptOutBuffersMaximumSize(const size_t plainMessageSize,  const 
  * 	In all cases, the identified source of the message will be the localDeviceId
  *
  * 	If the X3DH server can't provide keys for a peer device, its status is set to fail and its DRmessageSize is 0. Other devices get their encrypted message
- * 	If no peer device could get encrypted for all of them are missing keys on the X3DH server, the callback will still be called with success exit status
+ * 	If no peer device could get encrypted for all of them are missing keys on the X3DH server, the callback will be called with fail exit status
  *
  * @note all buffers are allocated by caller. If a buffer is too small to get the data, the function will return an error.
  *
@@ -389,7 +398,30 @@ int lime_ffi_delete_peerDevice(lime_manager_t manager, const char *peerDeviceId)
  *
  * @return LIME_FFI_SUCCESS or a negative error code
  */
-int lime_ffi_update(lime_manager_t manager,  const lime_ffi_Callback callback, void *callbackUserData, uint16_t OPkServerLowLimit, uint16_t OPkBatchSize);
+int lime_ffi_update(lime_manager_t manager, const lime_ffi_Callback callback, void *callbackUserData, uint16_t OPkServerLowLimit, uint16_t OPkBatchSize);
+
+/**
+ * @brief Set the X3DH key server URL for this identified user
+ *
+ * @param[in]	manager			pointer to the opaque structure used to interact with lime
+ * @param[in]	localDeviceId		Identify the local user account, it must be unique and is also be used as Id on the X3DH key server, it shall be the GRUU
+ * @param[in]	x3dhServerUrl		The complete url(including port) of the X3DH key server. It must connect using HTTPS. Example: https://sip5.linphone.org:25519
+ *
+ * @return LIME_FFI_SUCCESS or a negative error code
+ */
+int lime_ffi_set_x3dhServerUrl(lime_manager_t manager, const char *localDeviceId, const char *x3dhServerUrl);
+
+/**
+ * @brief Get the X3DH key server URL for this identified user
+ *
+ * @param[in]		manager			pointer to the opaque structure used to interact with lime
+ * @param[in]		localDeviceId		Identify the local user account, it must be unique and is also be used as Id on the X3DH key server, it shall be the GRUU, in a NULL terminated string
+ * @param[in]		x3dhServerUrl		The complete url(including port) of the X3DH key server in a NULL terminated string
+ * @param[in/out]	x3dhServerUrlSize	Size of the previous buffer, is updated with actual size of data written(without the '\0', would give the same result as strlen.)
+ *
+ * @return LIME_FFI_SUCCESS or a negative error code
+ */
+int lime_ffi_get_x3dhServerUrl(lime_manager_t manager, const char *localDeviceId, char *x3dhServerUrl, size_t *x3dhServerUrlSize);
 
 #ifdef __cplusplus
 }

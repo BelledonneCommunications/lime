@@ -219,6 +219,19 @@ int lime_ffi_delete_user(lime_manager_t manager, const char *localDeviceId, cons
 	return LIME_FFI_SUCCESS;
 }
 
+int lime_ffi_is_user(lime_manager_t manager, const char *localDeviceId) {
+	try {
+		if (manager->context->is_user(std::string(localDeviceId))) {
+			return LIME_FFI_SUCCESS;
+		} else {
+			return LIME_FFI_USER_NOT_FOUND;
+		}
+	} catch (exception const &e) { // catch anything (BctbxException are already taken care of by is_user, but other kind may arise)
+		LIME_LOGE<<"FFI failed to delete user: "<<e.what();
+		return LIME_FFI_INTERNAL_ERROR;
+	}
+}
+
 int lime_ffi_encryptOutBuffersMaximumSize(const size_t plainMessageSize, const enum lime_ffi_CurveId curve, size_t *DRmessageSize, size_t *cipherMessageSize) {
 	/* cipherMessage maximum size is plain message size + auth tag size */
 	*cipherMessageSize = plainMessageSize + lime::settings::DRMessageAuthTagSize;
@@ -364,6 +377,7 @@ int lime_ffi_get_selfIdentityKey(lime_manager_t manager, const char *localDevice
 			*IkSize = l_Ik.size();
 			return LIME_FFI_SUCCESS;
 		} else {
+			*IkSize = 0;
 			return LIME_FFI_OUTPUT_BUFFER_TOO_SMALL;
 		}
 	} catch (BctbxException const &e) {
@@ -419,4 +433,42 @@ int lime_ffi_update(lime_manager_t manager,  const lime_ffi_Callback callback, v
 	return LIME_FFI_SUCCESS;
 
 }
+
+int lime_ffi_set_x3dhServerUrl(lime_manager_t manager, const char *localDeviceId, const char *x3dhServerUrl) {
+	try {
+		manager->context->set_x3dhServerUrl(std::string(localDeviceId), std::string(x3dhServerUrl));
+	} catch (BctbxException const &e) {
+		LIME_LOGE<<"FFI failed during set X3DH server Url: "<<e.str();
+		return LIME_FFI_INTERNAL_ERROR;
+	} catch (exception const &e) { // catch anything
+		LIME_LOGE<<"FFI failed during set X3DH server Url: "<<e.what();
+		return LIME_FFI_INTERNAL_ERROR;
+	}
+	return LIME_FFI_SUCCESS;
+}
+
+
+int lime_ffi_get_x3dhServerUrl(lime_manager_t manager, const char *localDeviceId, char *x3dhServerUrl, size_t *x3dhServerUrlSize) {
+	std::string url{};
+	try {
+		url = manager->context->get_x3dhServerUrl(std::string(localDeviceId));
+	} catch (BctbxException const &e) {
+		LIME_LOGE<<"FFI failed during get X3DH server Url: "<<e.str();
+		return LIME_FFI_INTERNAL_ERROR;
+	} catch (exception const &e) { // catch anything
+		LIME_LOGE<<"FFI failed during get X3DH server Url: "<<e.what();
+		return LIME_FFI_INTERNAL_ERROR;
+	}
+	// check the output buffer is large enough
+	if (url.size() >= *x3dhServerUrlSize) { // >= as we need room for the NULL termination
+		*x3dhServerUrlSize = 0;
+		return LIME_FFI_OUTPUT_BUFFER_TOO_SMALL;
+	} else {
+		std::copy_n(url.begin(), url.size(), x3dhServerUrl);
+		x3dhServerUrl[url.size()] = '\0';
+		*x3dhServerUrlSize = url.size();
+		return LIME_FFI_SUCCESS;
+	}
+}
+
 } // extern "C"

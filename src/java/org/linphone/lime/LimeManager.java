@@ -100,6 +100,15 @@ public class LimeManager {
 	public native void delete_user(String localDeviceId, LimeStatusCallback statusObj) throws LimeException;
 
 	/**
+	 * @brief Check if a user is present and active in local storage
+	 *
+	 * @param[in]	localDeviceId	Identify the local user acount to use, it must be unique and is also be used as Id on the X3DH key server, it shall be the GRUU
+	 *
+	 * @return true if the user is active in the local storage, false otherwise
+	 */
+	public native boolean is_user(String localDeviceId) throws LimeException;
+
+	/**
 	 * @brief Encrypt a buffer (text or file) for a given list of recipient devices
 	 *
 	 * if specified localDeviceId is not found in local Storage, throw an exception
@@ -120,7 +129,7 @@ public class LimeManager {
 	 * 	In all cases, the identified source of the message will be the localDeviceId
 	 *
 	 * 	If the X3DH server can't provide keys for a peer device, its status is set to fail and its DRmessage is empty. Other devices get their encrypted message
-	 * 	If no peer device could get encrypted for all of them are missing keys on the X3DH server, the callback will still be called with success exit status
+	 * 	If no peer device could get encrypted for all of them are missing keys on the X3DH server, the callback will be called with fail exit status
 	 *
 	 * @note nearly all parameters are shared pointers as the process being asynchronous, the ownership will be taken internally exempting caller to manage the buffers.
 	 *
@@ -143,7 +152,7 @@ public class LimeManager {
 		this.n_encrypt(localDeviceId, recipientUserId, recipients, plainMessage, cipherMessage, statusObj, encryptionPolicy.getNative());
 	}
 	/**
-	* @overload encrypt(String localDeviceId, String recipientUserId, RecipientData[] recipients, byte[] plainMessage, LimeOutputBuffer cipherMessage, LimeStatusCallback statusObj
+	* @overload encrypt(String localDeviceId, String recipientUserId, RecipientData[] recipients, byte[] plainMessage, LimeOutputBuffer cipherMessage, LimeStatusCallback statusObj)
 	* convenience form using LimeEncryptionPolicy.OPTIMIZEUPLOADSIZE as default policy
 	*/
 	public void encrypt(String localDeviceId, String recipientUserId, RecipientData[] recipients, byte[] plainMessage, LimeOutputBuffer cipherMessage, LimeStatusCallback statusObj) {
@@ -288,6 +297,25 @@ public class LimeManager {
 	 * Call is silently ignored if the device is not found in local storage
 	 */
 	public native void delete_peerDevice(String peerDeviceId);
+
+	/**
+	 * @brief Set the X3DH key server URL for this identified user
+	 * if specified localDeviceId is not found in local Storage, throw an exception
+	 *
+	 * @param[in]	localDeviceId		Identify the local user acount to use, it must be unique and is also be used as Id on the X3DH key server, it shall be the GRUU
+	 * @param[in]	serverURL		The complete url(including port) of the X3DH key server. It must connect using HTTPS. Example: https://sip5.linphone.org:25519
+	 */
+	public native void set_x3dhServerUrl(String localDeviceId, String serverURL) throws LimeException;
+
+	/**
+	 * @brief Get the X3DH key server URL for this identified user
+	 * if specified localDeviceId is not found in local Storage, throw an exception
+	 *
+	 * @param[in]	localDeviceId		Identify the local user acount to use, it must be unique and is also be used as Id on the X3DH key server, it shall be the GRUU
+	 *
+	 * @return	serverURL		The complete url(including port) of the X3DH key server.
+	 */
+	public native String get_x3dhServerUrl(String localDeviceId) throws LimeException;
 
 	/**
 	 * @brief native function to process the X3DH server response

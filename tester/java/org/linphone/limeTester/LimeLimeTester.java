@@ -57,13 +57,34 @@ public class LimeLimeTester {
 		// Create alice lime managers
 		LimeManager aliceManager = new LimeManager(aliceDbFilename, postObj);
 
-		// Create random device id for alice and bob
+		// Create random device id for alice
 		String AliceDeviceId = "alice."+UUID.randomUUID().toString();
 
 		try {
+			// Check alice is not already there
+			assert(aliceManager.is_user(AliceDeviceId) == false);
+
 			aliceManager.create_user(AliceDeviceId, x3dhServerUrl, curveId, 10, statusCallback);
 			expected_success+= 1;
 			assert (statusCallback.wait_for_success(expected_success));
+
+			// Check alice is there
+			assert(aliceManager.is_user(AliceDeviceId) == true);
+
+			// Get alice x3dh server url
+			assert(aliceManager.get_x3dhServerUrl(AliceDeviceId).equals(x3dhServerUrl));
+
+			// Set the X3DH URL server to something else and check it worked
+			aliceManager.set_x3dhServerUrl(AliceDeviceId, "https://testing.testing:12345");
+			assert(aliceManager.get_x3dhServerUrl(AliceDeviceId).equals("https://testing.testing:12345"));
+			// Force a reload of data from local storage just to be sure the modification was perform correctly
+			aliceManager.nativeDestructor();
+			aliceManager = null;
+			aliceManager = new LimeManager(aliceDbFilename, postObj);
+			assert(aliceManager.is_user(AliceDeviceId) == true); // Check again after LimeManager reload that Alice is in local storage
+			assert(aliceManager.get_x3dhServerUrl(AliceDeviceId).equals("https://testing.testing:12345"));
+			// Set it back to the regular one to be able to complete the test
+			aliceManager.set_x3dhServerUrl(AliceDeviceId, x3dhServerUrl);
 		}
 		catch (LimeException e) {
 			assert(false):"Got an unexpected exception during Lime user management test: "+e.getMessage();
@@ -383,8 +404,7 @@ public class LimeLimeTester {
 
 			LimeOutputBuffer cipherMessage = new LimeOutputBuffer();
 			aliceManager.encrypt(AliceDeviceId, "bob", recipients, LimeTesterUtils.patterns[0].getBytes(), cipherMessage, statusCallback);
-			expected_success+= 1;
-			assert (statusCallback.wait_for_success(expected_success));
+			assert (statusCallback.wait_for_fail(++expected_fail)); // no recipients got a message, callback will return a fail
 			assert (recipients[0].getPeerStatus() == LimePeerDeviceStatus.FAIL); // the device is unknown, so it shall fail
 
 			// Alice sends a message to bob 3 devices, one is non existent

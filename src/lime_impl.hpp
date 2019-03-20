@@ -73,14 +73,16 @@ namespace lime {
 			/* database related functions, implementation is in lime_localStorage.cpp */
 			// create user in DB, throw an exception if already there or something went wrong
 			bool create_user();
+			// Once X3DH server confirms user registration, active it locally
+			bool activate_user();
 			// user load from DB is implemented directly as a Db member function, output of it is passed to Lime<> ctor
 			void get_SelfIdentityKey(); // check our Identity key pair is loaded in Lime object, retrieve it from DB if it isn't
 			void cache_DR_sessions(std::vector<RecipientInfos<Curve>> &internal_recipients, std::vector<std::string> &missing_devices); // loop on internal recipient an try to load in DR session cache the one which have no session attached 
 			void get_DRSessions(const std::string &senderDeviceId, const long int ignoreThisDRSessionId, std::vector<std::shared_ptr<DR<Curve>>> &DRSessions); // load from local storage in DRSessions all DR session matching the peerDeviceId, ignore the one picked by id in 2nd arg
 
 			/* X3DH related  - part related to exchange with server or localStorage - implemented in lime_x3dh_protocol.cpp or lime_localStorage.cpp */
-			void X3DH_generate_SPk(X<Curve, lime::Xtype::publicKey> &publicSPk, DSA<Curve, lime::DSAtype::signature> &SPk_sig, uint32_t &SPk_id); // generate a new Signed Pre-Key key pair, store it in DB and set its public key, signature and Id in given params
-			void X3DH_generate_OPks(std::vector<X<Curve, lime::Xtype::publicKey>> &publicOPks, std::vector<uint32_t> &OPk_ids, const uint16_t OPk_number); // generate a new batch of OPks, store them in base and fill the vector with information to be sent to X3DH server
+			void X3DH_generate_SPk(X<Curve, lime::Xtype::publicKey> &publicSPk, DSA<Curve, lime::DSAtype::signature> &SPk_sig, uint32_t &SPk_id, const bool load=false); // generate a new Signed Pre-Key key pair, store it in DB and set its public key, signature and Id in given params
+			void X3DH_generate_OPks(std::vector<X<Curve, lime::Xtype::publicKey>> &publicOPks, std::vector<uint32_t> &OPk_ids, const uint16_t OPk_number, const bool load=false); // generate a new batch of OPks, store them in base and fill the vector with information to be sent to X3DH server
 			void X3DH_get_SPk(uint32_t SPk_id, Xpair<Curve> &SPk); // retrieve matching SPk from localStorage, throw an exception if not found
 			bool is_currentSPk_valid(void); // check validity of current SPk
 			void X3DH_get_OPk(uint32_t OPk_id, Xpair<Curve> &OPk); // retrieve matching OPk from localStorage, throw an exception if not found
@@ -108,6 +110,8 @@ namespace lime {
 			void get_Ik(std::vector<uint8_t> &Ik) override;
 			void encrypt(std::shared_ptr<const std::string> recipientUserId, std::shared_ptr<std::vector<RecipientData>> recipients, std::shared_ptr<const std::vector<uint8_t>> plainMessage, const lime::EncryptionPolicy encryptionPolicy, std::shared_ptr<std::vector<uint8_t>> cipherMessage, const limeCallback &callback) override;
 			lime::PeerDeviceStatus decrypt(const std::string &recipientUserId, const std::string &senderDeviceId, const std::vector<uint8_t> &DRmessage, const std::vector<uint8_t> &cipherMessage, std::vector<uint8_t> &plainMessage) override;
+			void set_x3dhServerUrl(const std::string &x3dhServerUrl) override;
+			std::string get_x3dhServerUrl() override;
 	};
 
 	/**
@@ -127,8 +131,6 @@ namespace lime {
 		std::shared_ptr<const std::vector<uint8_t>> plainMessage;
 		/// ciphertext buffer. Needed for encryption: get a shared ref to keep params alive
 		std::shared_ptr<std::vector<uint8_t>> cipherMessage;
-		/// used to run a simple state machine at user creation to perform sequence of packet sending: registerUser, postSPk, postOPks
-		lime::network_state network_state_machine;
 		/// the encryption policy from the original encryption request(if running an encryption request), copy its value instead of holding a shared_ptr on it
 		lime::EncryptionPolicy encryptionPolicy;
 		/// Used when fetching from server self OPk to check if we shall upload more
@@ -137,15 +139,15 @@ namespace lime {
 		uint16_t OPkBatchSize;
 
 		/// created at user create/delete and keys Post. EncryptionPolicy is not used, set it to the default value anyway
-		callbackUserData(std::weak_ptr<Lime<Curve>> thiz, const limeCallback &callbackRef, uint16_t OPkInitialBatchSize=lime::settings::OPk_initialBatchSize, bool startRegisterUserSequence=false)
+		callbackUserData(std::weak_ptr<Lime<Curve>> thiz, const limeCallback &callbackRef, uint16_t OPkInitialBatchSize=lime::settings::OPk_initialBatchSize)
 			: limeObj{thiz}, callback{callbackRef},
-			recipientUserId{nullptr}, recipients{nullptr}, plainMessage{nullptr}, cipherMessage{nullptr}, network_state_machine{startRegisterUserSequence?lime::network_state::sendSPk:lime::network_state::done},
+			recipientUserId{nullptr}, recipients{nullptr}, plainMessage{nullptr}, cipherMessage{nullptr},
 			encryptionPolicy(lime::EncryptionPolicy::optimizeUploadSize), OPkServerLowLimit(0), OPkBatchSize(OPkInitialBatchSize) {};
 
 		/// created at update: getSelfOPks. EncryptionPolicy is not used, set it to the default value anyway
 		callbackUserData(std::weak_ptr<Lime<Curve>> thiz, const limeCallback &callbackRef, uint16_t OPkServerLowLimit, uint16_t OPkBatchSize)
 			: limeObj{thiz}, callback{callbackRef},
-			recipientUserId{nullptr}, recipients{nullptr}, plainMessage{nullptr}, cipherMessage{nullptr}, network_state_machine{lime::network_state::done},
+			recipientUserId{nullptr}, recipients{nullptr}, plainMessage{nullptr}, cipherMessage{nullptr},
 			encryptionPolicy(lime::EncryptionPolicy::optimizeUploadSize), OPkServerLowLimit{OPkServerLowLimit}, OPkBatchSize{OPkBatchSize} {};
 
 		/// created at encrypt(getPeerBundle)
@@ -154,7 +156,7 @@ namespace lime {
 				std::shared_ptr<const std::vector<uint8_t>> plainMessage, std::shared_ptr<std::vector<uint8_t>> cipherMessage,
 				lime::EncryptionPolicy policy)
 			: limeObj{thiz}, callback{callbackRef},
-			recipientUserId{recipientUserId}, recipients{recipients}, plainMessage{plainMessage}, cipherMessage{cipherMessage}, network_state_machine {lime::network_state::done}, // copy construct all shared_ptr
+			recipientUserId{recipientUserId}, recipients{recipients}, plainMessage{plainMessage}, cipherMessage{cipherMessage}, // copy construct all shared_ptr
 			encryptionPolicy(policy), OPkServerLowLimit(0), OPkBatchSize(0) {};
 
 		/// do not copy callback data, force passing the pointer around after creation

@@ -32,13 +32,13 @@ namespace lime {
 	LimeManager::LimeManager(const std::string &db_access, const limeX3DHServerPostData &X3DH_post_data, const bool multithread)
 		: m_users_cache{}, m_db_access{db_access}, m_X3DH_post_data{X3DH_post_data}, m_mutex{std::make_shared<LimeMutex>(multithread)} { }
 
-	void LimeManager::load_user(std::shared_ptr<LimeGeneric> &user, const std::string &localDeviceId) {
+	void LimeManager::load_user(std::shared_ptr<LimeGeneric> &user, const std::string &localDeviceId, const bool allStatus) {
 		try {
 			m_mutex->lock();
 			// Load user object
 			auto userElem = m_users_cache.find(localDeviceId);
 			if (userElem == m_users_cache.end()) { // not in cache, load it from DB
-				user = load_LimeUser(m_db_access, localDeviceId, m_X3DH_post_data, m_mutex);
+				user = load_LimeUser(m_db_access, localDeviceId, m_X3DH_post_data, m_mutex, allStatus);
 				m_users_cache[localDeviceId]=user;
 			} else {
 				user = userElem->second;
@@ -92,9 +92,23 @@ namespace lime {
 
 		// Load user object
 		std::shared_ptr<LimeGeneric> user;
-		LimeManager::load_user(user, localDeviceId);
+		LimeManager::load_user(user, localDeviceId, true); // load user even if inactive as we are deleting it anyway
 
 		user->delete_user(managerDeleteCallback);
+	}
+
+	bool LimeManager::is_user(const std::string &localDeviceId) {
+		try {
+			// Load user object
+			std::shared_ptr<LimeGeneric> user;
+			LimeManager::load_user(user, localDeviceId);
+
+			return true; // If we are able to load the user, it means it exists
+		} catch (BctbxException const &e) { // we get an exception if the user is not found
+			// swallow it and return false
+			return false;
+		}
+
 	}
 
 	void LimeManager::encrypt(const std::string &localDeviceId, std::shared_ptr<const std::string> recipientUserId, std::shared_ptr<std::vector<RecipientData>> recipients, std::shared_ptr<const std::vector<uint8_t>> plainMessage, std::shared_ptr<std::vector<uint8_t>> cipherMessage, const limeCallback &callback, const lime::EncryptionPolicy encryptionPolicy) {
@@ -216,6 +230,23 @@ namespace lime {
 		auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(m_db_access));
 
 		localStorage->delete_peerDevice(peerDeviceId);
+	}
+
+	void LimeManager::set_x3dhServerUrl(const std::string &localDeviceId, const std::string &x3dhServerUrl) {
+		// load user (generate an exception if not found, let it flow up)
+		std::shared_ptr<LimeGeneric> user;
+		LimeManager::load_user(user, localDeviceId);
+
+		user->set_x3dhServerUrl(x3dhServerUrl);
+
+	}
+
+	std::string LimeManager::get_x3dhServerUrl(const std::string &localDeviceId) {
+		// load user (generate an exception if not found, let it flow up)
+		std::shared_ptr<LimeGeneric> user;
+		LimeManager::load_user(user, localDeviceId);
+
+		return user->get_x3dhServerUrl();
 	}
 
 
