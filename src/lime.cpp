@@ -80,7 +80,18 @@ namespace lime {
 	m_X3DH_post_data{X3DH_post_data}, m_X3DH_Server_URL{url},
 	m_DR_sessions_cache{}, m_ongoing_encryption{nullptr}, m_encryption_queue{}
 	{
-		create_user();
+		try {
+			m_mutex->lock();
+			create_user();
+			m_mutex->unlock();
+		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
+			m_mutex->unlock();
+			throw e;
+		} catch (exception const &e) { // catch all and let flow it up
+			m_mutex->unlock();
+			// just leave the exception flow up
+			throw e;
+		}
 	}
 
 	template <typename Curve>
@@ -95,16 +106,29 @@ namespace lime {
 	template <typename Curve>
 	void Lime<Curve>::publish_user(const limeCallback &callback, const uint16_t OPkInitialBatchSize) {
 		auto userData = make_shared<callbackUserData<Curve>>(this->shared_from_this(), callback, OPkInitialBatchSize);
-		get_SelfIdentityKey(); // make sure our Ik is loaded in object
-		/* Generate (or load if they already are in base when publishing an inactive user) the SPk */
+
 		X<Curve, lime::Xtype::publicKey> SPk{};
 		DSA<Curve, lime::DSAtype::signature> SPk_sig{};
 		uint32_t SPk_id=0;
-		X3DH_generate_SPk(SPk, SPk_sig, SPk_id, true);
-		// Generate (or load if they already are in base when publishing an inactive user) the OPks
 		std::vector<X<Curve, lime::Xtype::publicKey>> OPks{};
 		std::vector<uint32_t> OPk_ids{};
-		X3DH_generate_OPks(OPks, OPk_ids, OPkInitialBatchSize, true);
+
+		try {
+			m_mutex->lock();
+			get_SelfIdentityKey(); // make sure our Ik is loaded in object
+			/* Generate (or load if they already are in base when publishing an inactive user) the SPk */
+			X3DH_generate_SPk(SPk, SPk_sig, SPk_id, true);
+			// Generate (or load if they already are in base when publishing an inactive user) the OPks
+			X3DH_generate_OPks(OPks, OPk_ids, OPkInitialBatchSize, true);
+			m_mutex->unlock();
+		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
+			m_mutex->unlock();
+			throw e;
+		} catch (exception const &e) { // catch all and let flow it up
+			m_mutex->unlock();
+			// just leave the exception flow up
+			throw e;
+		}
 
 		// Build and post the message to server
 		std::vector<uint8_t> X3DHmessage{};
@@ -115,7 +139,19 @@ namespace lime {
 	template <typename Curve>
 	void Lime<Curve>::delete_user(const limeCallback &callback) {
 		// delete user from local Storage
-		m_localStorage->delete_LimeUser(m_selfDeviceId);
+		try  {
+			m_mutex->lock();
+			m_localStorage->delete_LimeUser(m_selfDeviceId);
+			m_mutex->unlock();
+		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
+			m_mutex->unlock();
+			throw e;
+		} catch (exception const &e) { // catch all and let flow it up
+			m_mutex->unlock();
+			// just leave the exception flow up
+			throw e;
+		}
+
 
 		// delete user from server
 		auto userData = make_shared<callbackUserData<Curve>>(this->shared_from_this(), callback);
@@ -170,62 +206,64 @@ namespace lime {
 	void Lime<Curve>::encrypt(std::shared_ptr<const std::string> recipientUserId, std::shared_ptr<std::vector<RecipientData>> recipients, std::shared_ptr<const std::vector<uint8_t>> plainMessage, const lime::EncryptionPolicy encryptionPolicy, std::shared_ptr<std::vector<uint8_t>> cipherMessage, const limeCallback &callback) {
 		LIME_LOGI<<"encrypt from "<<m_selfDeviceId<<" to "<<recipients->size()<<" recipients";
 		/* Check if we have all the Double Ratchet sessions ready or shall we go for an X3DH */
-		std::vector<std::string> missingPeers; /* vector of deviceId(GRUU) which are requested to perform X3DH before the encryption can occurs */
 
 		/* Create the appropriate recipient infos and fill it with sessions found in cache */
 		// internal_recipients is a vector duplicating the recipients one in the same order (ignoring the one with peerStatus set to fail)
 		// This allows fast copying of relevant information back to recipients when encryption is completed
 		std::vector<RecipientInfos<Curve>> internal_recipients{};
-		m_mutex->lock(); // While looking in live cache and DB if needed, lock the access
-		for (const auto &recipient : *recipients) {
-			// if the input recipient peerStatus is fail we must ignore it
-			// most likely: we're in a call after a key bundle fetch and this peer device does not have keys on the X3DH server
-			if (recipient.peerStatus != lime::PeerDeviceStatus::fail) {
-				auto sessionElem = m_DR_sessions_cache.find(recipient.deviceId);
-				if (sessionElem != m_DR_sessions_cache.end()) { // session is in cache
-					if (sessionElem->second->isActive()) { // the session in cache is active
-						internal_recipients.emplace_back(recipient.deviceId, sessionElem->second);
-					} else { // session in cache is not active(may append if last encryption reach sending chain symmetric ratchet usage)
+		// must be visible outside the try block
+		auto callbackStatus = lime::CallbackReturn::fail;
+		std::string callbackMessage{"All recipients failed to provide a key bundle"};
+		try {
+			m_mutex->lock(); // While looking in live cache and DB if needed, lock the access
+			for (const auto &recipient : *recipients) {
+				// if the input recipient peerStatus is fail we must ignore it
+				// most likely: we're in a call after a key bundle fetch and this peer device does not have keys on the X3DH server
+				if (recipient.peerStatus != lime::PeerDeviceStatus::fail) {
+					auto sessionElem = m_DR_sessions_cache.find(recipient.deviceId);
+					if (sessionElem != m_DR_sessions_cache.end()) { // session is in cache
+						if (sessionElem->second->isActive()) { // the session in cache is active
+							internal_recipients.emplace_back(recipient.deviceId, sessionElem->second);
+						} else { // session in cache is not active(may append if last encryption reach sending chain symmetric ratchet usage)
+							internal_recipients.emplace_back(recipient.deviceId);
+							m_DR_sessions_cache.erase(recipient.deviceId); // remove unactive session from cache
+						}
+					} else { // session is not in cache, just create it and the session ptr will be a nullptr
 						internal_recipients.emplace_back(recipient.deviceId);
-						m_DR_sessions_cache.erase(recipient.deviceId); // remove unactive session from cache
 					}
-				} else { // session is not in cache, just create it and the session ptr will be a nullptr
-					internal_recipients.emplace_back(recipient.deviceId);
 				}
 			}
-		}
 
-		/* try to load all the session that are not in cache and set the peer Device status for all recipients*/
-		std::vector<std::string> missing_devices{};
-		cache_DR_sessions(internal_recipients, missing_devices);
-		m_mutex->unlock();
+			/* try to load all the session that are not in cache and set the peer Device status for all recipients*/
+			std::vector<std::string> missing_devices{};
+			cache_DR_sessions(internal_recipients, missing_devices);
 
-		/* If we are still missing session we must ask the X3DH server for key bundles */
-		if (missing_devices.size()>0) {
-			// create a new callbackUserData, it shall be then deleted in callback, store in all shared_ptr to input/output values needed to call this encrypt function
-			auto userData = make_shared<callbackUserData<Curve>>(this->shared_from_this(), callback, recipientUserId, recipients, plainMessage, cipherMessage, encryptionPolicy);
-			m_mutex->lock(); // make sure this test and its consequence cannot be tempered by multithread access
-			if (m_ongoing_encryption == nullptr) { // no ongoing asynchronous encryption process it
-				m_ongoing_encryption = userData;
-				m_mutex->unlock();
-			} else { // some one else is expecting X3DH server response, enqueue this request
-				m_encryption_queue.push(userData);
-				m_mutex->unlock();
+
+			/* If we are still missing session we must ask the X3DH server for key bundles */
+			if (missing_devices.size()>0) {
+				// create a new callbackUserData, it shall be then deleted in callback, store in all shared_ptr to input/output values needed to call this encrypt function
+				auto userData = make_shared<callbackUserData<Curve>>(this->shared_from_this(), callback, recipientUserId, recipients, plainMessage, cipherMessage, encryptionPolicy);
+				if (m_ongoing_encryption == nullptr) { // no ongoing asynchronous encryption process it
+					m_ongoing_encryption = userData;
+				} else { // some one else is expecting X3DH server response, enqueue this request
+					m_encryption_queue.push(userData);
+					m_mutex->unlock();
+					return;
+				}
+				// retrieve bundles from X3DH server, when they arrive, it will run the X3DH initiation and create the DR sessions
+				std::vector<uint8_t> X3DHmessage{};
+				x3dh_protocol::buildMessage_getPeerBundles<Curve>(X3DHmessage, missing_devices);
+				m_mutex->unlock(); // unlock before calling external callbacks
+				postToX3DHServer(userData, X3DHmessage);
 				return;
 			}
-			// retrieve bundles from X3DH server, when they arrive, it will run the X3DH initiation and create the DR sessions
-			std::vector<uint8_t> X3DHmessage{};
-			x3dh_protocol::buildMessage_getPeerBundles<Curve>(X3DHmessage, missing_devices);
-			postToX3DHServer(userData, X3DHmessage);
-		} else { // got everyone, encrypt
-			m_mutex->lock(); // lock during actual encryption
+
+			// We have everyone: encrypt
 			encryptMessage(internal_recipients, *plainMessage, *recipientUserId, m_selfDeviceId, *cipherMessage, encryptionPolicy);
-			m_mutex->unlock();
+
 			// move DR messages to the input/output structure, ignoring again the input with peerStatus set to fail
 			// so the index on the internal_recipients still matches the way we created it from recipients
 			size_t i=0;
-			auto callbackStatus = lime::CallbackReturn::fail;
-			std::string callbackMessage{"All recipients failed to provide a key bundle"};
 			for (auto &recipient : *recipients) {
 				if (recipient.peerStatus != lime::PeerDeviceStatus::fail) {
 					recipient.DRmessage = std::move(internal_recipients[i].DRmessage);
@@ -235,17 +273,36 @@ namespace lime {
 					callbackMessage.clear();
 				}
 			}
-			if (callback) callback(callbackStatus, callbackMessage);
+		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
+			m_mutex->unlock();
+			throw e;
+		} catch (exception const &e) { // catch all and let flow it up
+			m_mutex->unlock();
+			// just leave the exception flow up
+			throw e;
+		}
+
+		m_mutex->unlock(); // unlock before calling external callbacks
+		if (callback) callback(callbackStatus, callbackMessage);
+
+		try {
 			// is there no one in an asynchronous encryption process and do we have something in encryption queue to process
 			m_mutex->lock(); // lock while poping the encryption queue
 			if (m_ongoing_encryption == nullptr && !m_encryption_queue.empty()) { // may happend when an encryption was queued but session was created by a previously queued encryption request
 				auto userData = m_encryption_queue.front();
 				m_encryption_queue.pop(); // remove it from queue and do it
-				m_mutex->unlock();
+				m_mutex->unlock(); // unlock before recursive call
 				encrypt(userData->recipientUserId, userData->recipients, userData->plainMessage, userData->encryptionPolicy, userData->cipherMessage, userData->callback);
 			} else {
 				m_mutex->unlock();
 			}
+		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
+			m_mutex->unlock();
+			throw e;
+		} catch (exception const &e) { // catch all and let flow it up
+			m_mutex->unlock();
+			// just leave the exception flow up
+			throw e;
 		}
 	}
 
@@ -263,8 +320,8 @@ namespace lime {
 		auto db_sessionIdInCache = 0; // this would be the db_sessionId of the session stored in cache if there is one, no session has the Id 0
 		if (sessionElem != m_DR_sessions_cache.end()) { // session is in cache, it is the active one, just give it a try
 			db_sessionIdInCache = sessionElem->second->dbSessionId();
-			std::vector<std::shared_ptr<DR<Curve>>> DRSessions{1, sessionElem->second}; // copy the session pointer into a vector as the decrypt function ask for it
-			if (decryptMessage<Curve>(senderDeviceId, m_selfDeviceId, recipientUserId, DRSessions, DRmessage, cipherMessage, plainMessage) != nullptr) {
+			std::vector<std::shared_ptr<DR<Curve>>> cached_DRSessions{1, sessionElem->second}; // copy the session pointer into a vector as the decrypt function ask for it
+			if (decryptMessage<Curve>(senderDeviceId, m_selfDeviceId, recipientUserId, cached_DRSessions, DRmessage, cipherMessage, plainMessage) != nullptr) {
 				// we manage to decrypt the message with the current active session loaded in cache
 				return senderDeviceStatus;
 			} else { // remove session from cache
@@ -399,7 +456,19 @@ namespace lime {
 #endif
 
 		/* open DB */
-		auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilename)); // create as unique ptr, ownership is then passed to the Lime structure when instanciated
+		std::unique_ptr<lime::Db> localStorage = nullptr;
+		try {
+			mutex->lock(); // The opening may trigger database creation, be sure to get the mutex before doing that
+			localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilename)); // create as unique ptr, ownership is then passed to the Lime structure when instanciated
+			mutex->unlock();
+		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
+			mutex->unlock();
+			throw e;
+		} catch (exception const &e) { // catch all and let flow it up
+			mutex->unlock();
+			// just leave the exception flow up
+			throw e;
+		}
 
 		try {
 			//instanciate the correct Lime object

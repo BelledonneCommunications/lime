@@ -71,7 +71,18 @@ namespace lime {
 			// then check if it went well, if not delete the user from localDB
 			if (returnCode != lime::CallbackReturn::success) {
 				auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(thiz->m_db_access));
-				localStorage->delete_LimeUser(localDeviceId);
+				try {
+					thiz->m_mutex->lock();
+					localStorage->delete_LimeUser(localDeviceId);
+					thiz->m_mutex->unlock();
+				} catch (BctbxException const &e) { // catch BctbxException and let them flow up
+					thiz->m_mutex->unlock();
+					throw e;
+				} catch (exception const &e) { // catch all and let flow it up
+					thiz->m_mutex->unlock();
+					// just leave the exception flow up
+					throw e;
+				}
 				thiz->m_users_cache.erase(localDeviceId);
 			}
 		});
@@ -125,8 +136,21 @@ namespace lime {
 		std::shared_ptr<LimeGeneric> user;
 		LimeManager::load_user(user, localDeviceId);
 
-		// call the decryption function
-		return user->decrypt(recipientUserId, senderDeviceId, DRmessage, cipherMessage, plainMessage);
+		lime::PeerDeviceStatus ret = lime::PeerDeviceStatus::fail;
+		try {
+			m_mutex->lock();
+			// call the decryption function
+			ret = user->decrypt(recipientUserId, senderDeviceId, DRmessage, cipherMessage, plainMessage);
+			m_mutex->unlock();
+		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
+			m_mutex->unlock();
+			throw e;
+		} catch (exception const &e) { // catch all and let flow it up
+			m_mutex->unlock();
+			// just leave the exception flow up
+			throw e;
+		}
+		return ret;
 	}
 
 	// convenience definition, have a decrypt without cipherMessage input for the case we don't have it(DR message encryption policy)

@@ -533,6 +533,19 @@ int wait_for(belle_sip_stack_t*s1,int* counter,int value,int timeout) {
 	else return TRUE;
 }
 
+// same as above but multithread proof with a mutex
+int wait_for_mutex(belle_sip_stack_t*s1,int* counter,int value,int timeout, bctbx_mutex_t *mutex) {
+	int retry=0;
+#define SLEEP_TIME 50
+	while (*counter!=value && retry++ <(timeout/SLEEP_TIME)) {
+		bctbx_mutex_lock(mutex);
+		if (s1) belle_sip_stack_sleep(s1,SLEEP_TIME);
+		bctbx_mutex_unlock(mutex);
+	}
+	if (*counter!=value) return FALSE;
+	else return TRUE;
+}
+
 // template instanciation
 #ifdef EC25519_ENABLED
 	template void dr_sessionsInit<C255>(std::shared_ptr<DR<C255>> &alice, std::shared_ptr<DR<C255>> &bob, std::shared_ptr<lime::Db> &localStorageAlice, std::shared_ptr<lime::Db> &localStorageBob, std::string dbFilenameAlice, std::string dbFilenameBob, bool initStorage, std::shared_ptr<RNG> RNG_context); 
