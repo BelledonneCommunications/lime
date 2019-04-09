@@ -45,13 +45,12 @@ namespace lime {
 	 * @param[in]		url				URL of the X3DH key server used to publish our keys(retrieved from DB)
 	 * @param[in]		X3DH_post_data			A function used to communicate with the X3DH server
 	 * @param[in]		Uid				the DB internal Id for this user, speed up DB operations by holding it in DB
-	 * @param[in]		mutex				pointer to the shared mutex used to manage DB access in multithreading environment
 	 *
 	 * @note: ownership of localStorage pointer is transfered to a shared pointer, private menber of Lime class
 	 */
 	template <typename Curve>
-	Lime<Curve>::Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, const long int Uid, std::shared_ptr<std::mutex> mutex)
-	: m_RNG{make_RNG()}, m_selfDeviceId{deviceId}, m_mutex{mutex},
+	Lime<Curve>::Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, const long int Uid)
+	: m_RNG{make_RNG()}, m_selfDeviceId{deviceId},
 	m_Ik{}, m_Ik_loaded(false),
 	m_localStorage(std::move(localStorage)), m_db_Uid{Uid},
 	m_X3DH_post_data{X3DH_post_data}, m_X3DH_Server_URL{url},
@@ -68,19 +67,17 @@ namespace lime {
 	 * @param[in]		deviceId			device Id(shall be GRUU), stored in the structure
 	 * @param[in]		url				URL of the X3DH key server used to publish our keys
 	 * @param[in]		X3DH_post_data			A function used to communicate with the X3DH server
-	 * @param[in]		mutex				pointer to the shared mutex used to manage DB access in multithreading environment
 	 *
 	 * @note: ownership of localStorage pointer is transfered to a shared pointer, private menber of Lime class
 	 */
 	template <typename Curve>
-	Lime<Curve>::Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<std::mutex> mutex)
-	: m_RNG{make_RNG()}, m_selfDeviceId{deviceId}, m_mutex{mutex},
+	Lime<Curve>::Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data)
+	: m_RNG{make_RNG()}, m_selfDeviceId{deviceId},
 	m_Ik{}, m_Ik_loaded(false),
 	m_localStorage(std::move(localStorage)), m_db_Uid{0},
 	m_X3DH_post_data{X3DH_post_data}, m_X3DH_Server_URL{url},
 	m_DR_sessions_cache{}, m_ongoing_encryption{nullptr}, m_encryption_queue{}
 	{
-		std::lock_guard<std::mutex> lock(*m_mutex);
 		create_user();
 	}
 
@@ -103,13 +100,11 @@ namespace lime {
 		std::vector<X<Curve, lime::Xtype::publicKey>> OPks{};
 		std::vector<uint32_t> OPk_ids{};
 
-		std::unique_lock<std::mutex> lock(*m_mutex);
 		get_SelfIdentityKey(); // make sure our Ik is loaded in object
 		/* Generate (or load if they already are in base when publishing an inactive user) the SPk */
 		X3DH_generate_SPk(SPk, SPk_sig, SPk_id, true);
 		// Generate (or load if they already are in base when publishing an inactive user) the OPks
 		X3DH_generate_OPks(OPks, OPk_ids, OPkInitialBatchSize, true);
-		lock.unlock(); // unlock the mutex before posting to server
 
 		// Build and post the message to server
 		std::vector<uint8_t> X3DHmessage{};
@@ -120,9 +115,7 @@ namespace lime {
 	template <typename Curve>
 	void Lime<Curve>::delete_user(const limeCallback &callback) {
 		// delete user from local Storage
-		std::unique_lock<std::mutex> lock(*m_mutex);
 		m_localStorage->delete_LimeUser(m_selfDeviceId);
-		lock.unlock(); // unlock the mutex before posting to server
 
 		// delete user from server
 		auto userData = make_shared<callbackUserData<Curve>>(this->shared_from_this(), callback);
@@ -182,8 +175,8 @@ namespace lime {
 		// internal_recipients is a vector duplicating the recipients one in the same order (ignoring the one with peerStatus set to fail)
 		// This allows fast copying of relevant information back to recipients when encryption is completed
 		std::vector<RecipientInfos<Curve>> internal_recipients{};
-		// must be visible outside the try block
-		std::unique_lock<std::mutex> lock(*m_mutex);
+
+		std::unique_lock<std::mutex> lock(m_mutex);
 		for (const auto &recipient : *recipients) {
 			// if the input recipient peerStatus is fail we must ignore it
 			// most likely: we're in a call after a key bundle fetch and this peer device does not have keys on the X3DH server
@@ -257,6 +250,7 @@ namespace lime {
 
 	template <typename Curve>
 	lime::PeerDeviceStatus Lime<Curve>::decrypt(const std::string &recipientUserId, const std::string &senderDeviceId, const std::vector<uint8_t> &DRmessage, const std::vector<uint8_t> &cipherMessage, std::vector<uint8_t> &plainMessage) {
+		std::lock_guard<std::mutex> lock(m_mutex);
 		// before trying to decrypt, we must check if the sender device is known in the local Storage and if we trust it
 		// a successful decryption will insert it in local storage so we must check first if it is there in order to detect new devices
 		// Note: a device could already be trusted in DB even before the first message (if we established trust before sending the first message)
@@ -386,11 +380,12 @@ namespace lime {
 	 * @param[in]	OPkInitialBatchSize		Number of OPks in the first batch uploaded to X3DH server
 	 * @param[in]	X3DH_post_data			A function used to communicate with the X3DH server
 	 * @param[in]	callback			To provide caller the operation result
+	 * @param[in]	db_mutex			a mutex to protect db access
 	 *
 	 * @return a pointer to the LimeGeneric class allowing access to API declared in lime_lime.hpp
 	 */
 	std::shared_ptr<LimeGeneric> insert_LimeUser(const std::string &dbFilename, const std::string &deviceId, const std::string &url, const lime::CurveId curve, const uint16_t OPkInitialBatchSize,
-			const limeX3DHServerPostData &X3DH_post_data, const limeCallback &callback, std::shared_ptr<std::mutex> mutex) {
+			const limeX3DHServerPostData &X3DH_post_data, const limeCallback &callback, std::shared_ptr<std::recursive_mutex> db_mutex) {
 		LIME_LOGI<<"Create Lime user "<<deviceId;
 		/* first check the requested curve is instanciable and return an exception if not */
 #ifndef EC25519_ENABLED
@@ -405,9 +400,7 @@ namespace lime {
 #endif
 
 		/* open DB */
-		std::unique_lock<std::mutex> lock(*mutex);
-		std::unique_ptr<lime::Db> localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilename)); // create as unique ptr, ownership is then passed to the Lime structure when instanciated
-		lock.unlock();
+		std::unique_ptr<lime::Db> localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilename, db_mutex)); // create as unique ptr, ownership is then passed to the Lime structure when instanciated
 
 		try {
 			//instanciate the correct Lime object
@@ -416,7 +409,7 @@ namespace lime {
 #ifdef EC25519_ENABLED
 				{
 					/* constructor will insert user in Db, if already present, raise an exception*/
-					auto lime_ptr = std::make_shared<Lime<C255>>(std::move(localStorage), deviceId, url, X3DH_post_data, mutex);
+					auto lime_ptr = std::make_shared<Lime<C255>>(std::move(localStorage), deviceId, url, X3DH_post_data);
 					lime_ptr->publish_user(callback, OPkInitialBatchSize);
 					return lime_ptr;
 				}
@@ -426,7 +419,7 @@ namespace lime {
 				case lime::CurveId::c448 :
 #ifdef EC448_ENABLED
 				{
-					auto lime_ptr = std::make_shared<Lime<C448>>(std::move(localStorage), deviceId, url, X3DH_post_data, mutex);
+					auto lime_ptr = std::make_shared<Lime<C448>>(std::move(localStorage), deviceId, url, X3DH_post_data);
 					lime_ptr->publish_user(callback, OPkInitialBatchSize);
 					return lime_ptr;
 				}
@@ -450,17 +443,18 @@ namespace lime {
 	 *	Fail to find the user will raise an exception
 	 *	If allStatus flag is set to false (default value), raise an exception on inactive users otherwise load inactive user.
 	 *
-	 * @param[in]	dbFilename			Path to filename to use
-	 * @param[in]	deviceId			User to lookup in DB, deviceId shall be the GRUU
-	 * @param[in]	X3DH_post_data			A function used to communicate with the X3DH server
-	 * @param[in]	allStatus			allow loading of inactive user if set to true
+	 * @param[in]	dbFilename		Path to filename to use
+	 * @param[in]	deviceId		User to lookup in DB, deviceId shall be the GRUU
+	 * @param[in]	X3DH_post_data		A function used to communicate with the X3DH server
+	 * @param[in]	db_mutex		a mutex to protect db access
+	 * @param[in]	allStatus		allow loading of inactive user if set to true
 	 *
 	 * @return a pointer to the LimeGeneric class allowing access to API declared in lime_lime.hpp
 	 */
-	std::shared_ptr<LimeGeneric> load_LimeUser(const std::string &dbFilename, const std::string &deviceId, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<std::mutex> mutex, const bool allStatus) {
+	std::shared_ptr<LimeGeneric> load_LimeUser(const std::string &dbFilename, const std::string &deviceId, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<std::recursive_mutex> db_mutex, const bool allStatus) {
 
 		/* open DB and load user */
-		auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilename)); // create as unique ptr, ownership is then passed to the Lime structure when instanciated
+		auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilename, db_mutex)); // create as unique ptr, ownership is then passed to the Lime structure when instanciated
 		auto curve = CurveId::unset;
 		long int Uid=0;
 		std::string x3dh_server_url;
@@ -485,14 +479,14 @@ namespace lime {
 			switch (curve) {
 				case lime::CurveId::c25519 :
 #ifdef EC25519_ENABLED
-					return std::make_shared<Lime<C255>>(std::move(localStorage), deviceId, x3dh_server_url, X3DH_post_data, Uid, mutex);
+					return std::make_shared<Lime<C255>>(std::move(localStorage), deviceId, x3dh_server_url, X3DH_post_data, Uid);
 #endif
 				break;
 
 				case lime::CurveId::c448 :
 #ifdef EC448_ENABLED
 
-					return std::make_shared<Lime<C448>>(std::move(localStorage), deviceId, x3dh_server_url, X3DH_post_data, Uid, mutex);
+					return std::make_shared<Lime<C448>>(std::move(localStorage), deviceId, x3dh_server_url, X3DH_post_data, Uid);
 #endif
 				break;
 

@@ -3208,7 +3208,7 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 	auto aliceDeviceName = lime_tester::makeRandomDeviceName("alice.");
 
 	// a mutex to feed internal functions
-	auto m_mutex = std::make_shared<std::mutex>();
+	auto m_mutex = std::make_shared<std::recursive_mutex>();
 
 	try {
 		/*Check if Alice exists in the database */
@@ -3358,6 +3358,7 @@ static void user_registration_failure_test(const lime::CurveId curve, const std:
 	dbFilenameAlice.append(".alice.").append((curve==CurveId::c25519)?"C25519":"C448").append(".sqlite3");
 
 	remove(dbFilenameAlice.data()); // delete the database file if already exists
+	auto alice_db_mutex = make_shared<std::recursive_mutex>();
 
 	lime_tester::events_counters_t counters={};
 	int expected_success=0;
@@ -3394,7 +3395,7 @@ static void user_registration_failure_test(const lime::CurveId curve, const std:
 	try {
 		/* now we have the user in local base but not active and not in remote, lets check that */
 		/* load alice from DB(using insider functions) : user is not active, we shall get an exception */
-		auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilenameAlice));
+		auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilenameAlice, alice_db_mutex));
 		auto curve = CurveId::unset;
 		std::string x3dh_server_url;
 
@@ -3517,12 +3518,15 @@ struct mth_mailbox {
 	std::mutex b_mutex;
 	std::deque<mth_message> box;
 	std::string owner;
+	const int expectedMessageCount; // set at creation, expected message number to transit
+	int messageCount; // number of message fetched
 
 	bool fetch(mth_message &m) {
 		std::lock_guard<std::mutex> lock(b_mutex);
 		if (box.size()>0) {
 			m = box.back();
 			box.pop_back();
+			messageCount++;
 			return true;
 		}
 		return false;
@@ -3532,7 +3536,13 @@ struct mth_mailbox {
 		std::lock_guard<std::mutex> lock(b_mutex);
 		box.push_front(m);
 	}
-	mth_mailbox(std::string &owner) : owner{owner} {}
+
+	bool done() { // return true if we already processed the expected number of messages
+		std::lock_guard<std::mutex> lock(b_mutex);
+		return (messageCount>=expectedMessageCount);
+	}
+
+	mth_mailbox(std::string &owner, int expectedMessageCount) : owner{owner}, expectedMessageCount{expectedMessageCount}, messageCount{0} {}
 };
 
 
@@ -3555,31 +3565,31 @@ static constexpr size_t test_multithread_message_number = 10;
 
 static void lime_multithread_decrypt_thread(manager_thread_arg thread_arg) {
 
-	int decrypted_messages = 3*test_multithread_message_number; // we expect 3 times each message from patterns
-
 	auto pool = belle_sip_object_pool_push();
 
-	// RNG uniform between 10 and 400 ms
+	// RNG uniform between 0 and 400 ms
 	std::random_device rd;
 	std::mt19937 gen(rd());
-	std::uniform_int_distribution<> dis(10, 400);
+	std::uniform_int_distribution<> dis(0, 400);
 
 	try {
 		auto localDeviceId = thread_arg.userlist[thread_arg.userIndex];
 		auto box = thread_arg.mailbox->find(localDeviceId)->second;
 
 		// loop on all patterns available
-		while (decrypted_messages>0) {
-			// wait for a random period betwwen 10 and 400 ms
+		while (box->done() == false) {
+			// wait for a random period betwwen 0 and 400 ms
 			std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
 			// Fetch mailbox
 			mth_message m{};
-			while (box->fetch(m)) {
+			int fetchMax = 1+dis(gen)/200;
+			int fetched=0;
+			while (box->fetch(m) && fetched<fetchMax) {
 				std::vector<uint8_t> receivedMessage{};
 				BC_ASSERT_TRUE(thread_arg.manager->decrypt(localDeviceId, "friends", m.senderId, m.DRmessage, m.cipherMessage, receivedMessage) != lime::PeerDeviceStatus::fail);
 				std::string receivedMessageString{receivedMessage.begin(), receivedMessage.end()};
 				BC_ASSERT_TRUE(receivedMessageString == m.plainMessage);
-				decrypted_messages--;
+				fetched++;
 			}
 		}
 
@@ -3749,10 +3759,11 @@ static void lime_multithread_test(const lime::CurveId curve, const std::string &
 
 		// get a mailbox for each of them, same index
 		auto mailbox = make_shared<std::map<std::string, std::shared_ptr<mth_mailbox>>>();
-		mailbox->emplace(std::make_pair(deviceList[0], make_shared<mth_mailbox>(deviceList[0])));
-		mailbox->emplace(std::make_pair(deviceList[1], make_shared<mth_mailbox>(deviceList[1])));
-		mailbox->emplace(std::make_pair(deviceList[2], make_shared<mth_mailbox>(deviceList[2])));
-		mailbox->emplace(std::make_pair(deviceList[3], make_shared<mth_mailbox>(deviceList[3])));
+		auto expectedMessageCount = 9*test_multithread_message_number; // each recipient shall get 9 times the number of expedited messages by each encryption thread
+		mailbox->emplace(std::make_pair(deviceList[0], make_shared<mth_mailbox>(deviceList[0], expectedMessageCount)));
+		mailbox->emplace(std::make_pair(deviceList[1], make_shared<mth_mailbox>(deviceList[1], expectedMessageCount)));
+		mailbox->emplace(std::make_pair(deviceList[2], make_shared<mth_mailbox>(deviceList[2], expectedMessageCount)));
+		mailbox->emplace(std::make_pair(deviceList[3], make_shared<mth_mailbox>(deviceList[3], expectedMessageCount)));
 
 		// create Manager
 		auto aliceManager = std::make_shared<LimeManager>(dbFilenameAlice, X3DHServerPost_mutex);
@@ -3776,27 +3787,52 @@ static void lime_multithread_test(const lime::CurveId curve, const std::string &
 		c3.join();
 		c4.join();
 
-		// encrypt
-		std::thread t1(lime_multithread_encrypt_thread, dev1Arg);
-		std::thread t2(lime_multithread_encrypt_thread, dev2Arg);
-		std::thread t3(lime_multithread_encrypt_thread, dev3Arg);
-		std::thread t4(lime_multithread_encrypt_thread, dev4Arg);
+		// encrypt, three encryotion threads per user
+		std::thread enc11(lime_multithread_encrypt_thread, dev1Arg);
+		std::thread enc12(lime_multithread_encrypt_thread, dev2Arg);
+		std::thread enc13(lime_multithread_encrypt_thread, dev3Arg);
+		std::thread enc14(lime_multithread_encrypt_thread, dev4Arg);
+		std::thread enc21(lime_multithread_encrypt_thread, dev1Arg);
+		std::thread enc22(lime_multithread_encrypt_thread, dev2Arg);
+		std::thread enc23(lime_multithread_encrypt_thread, dev3Arg);
+		std::thread enc24(lime_multithread_encrypt_thread, dev4Arg);
+		std::thread enc31(lime_multithread_encrypt_thread, dev1Arg);
+		std::thread enc32(lime_multithread_encrypt_thread, dev2Arg);
+		std::thread enc33(lime_multithread_encrypt_thread, dev3Arg);
+		std::thread enc34(lime_multithread_encrypt_thread, dev4Arg);
 
-		// decrypt
-		std::thread t5(lime_multithread_decrypt_thread, dev1Arg);
-		std::thread t6(lime_multithread_decrypt_thread, dev2Arg);
-		std::thread t7(lime_multithread_decrypt_thread, dev3Arg);
-		std::thread t8(lime_multithread_decrypt_thread, dev4Arg);
+		// decrypt, two decryption threads per user
+		std::thread dec11(lime_multithread_decrypt_thread, dev1Arg);
+		std::thread dec12(lime_multithread_decrypt_thread, dev2Arg);
+		std::thread dec13(lime_multithread_decrypt_thread, dev3Arg);
+		std::thread dec14(lime_multithread_decrypt_thread, dev4Arg);
+		std::thread dec21(lime_multithread_decrypt_thread, dev1Arg);
+		std::thread dec22(lime_multithread_decrypt_thread, dev2Arg);
+		std::thread dec23(lime_multithread_decrypt_thread, dev3Arg);
+		std::thread dec24(lime_multithread_decrypt_thread, dev4Arg);
 
 		// wait for the threads to complete
-		t1.join();
-		t2.join();
-		t3.join();
-		t4.join();
-		t5.join();
-		t6.join();
-		t7.join();
-		t8.join();
+		enc11.join();
+		enc12.join();
+		enc13.join();
+		enc14.join();
+		enc21.join();
+		enc22.join();
+		enc23.join();
+		enc24.join();
+		enc31.join();
+		enc32.join();
+		enc33.join();
+		enc34.join();
+
+		dec11.join();
+		dec12.join();
+		dec13.join();
+		dec14.join();
+		dec21.join();
+		dec22.join();
+		dec23.join();
+		dec24.join();
 
 		// delete devices
 		std::thread d1(lime_multithread_delete_thread, dev1Arg);
@@ -3821,7 +3857,7 @@ static void lime_multithread_test(const lime::CurveId curve, const std::string &
 }
 
 static void lime_multithread(void) {
-	for (size_t i=0; i<10; i++) { // loop several times as the first messages sending/receiving are the most susceptible to bump into problems
+	for (size_t i=0; i<3; i++) { // loop several times as the first messages sending/receiving are the most susceptible to bump into problems
 #ifdef EC25519_ENABLED
 	lime_multithread_test(lime::CurveId::c25519, "lime_multithread", std::string("https://").append(lime_tester::test_x3dh_server_url).append(":").append(lime_tester::test_x3dh_c25519_server_port).data());
 #endif
