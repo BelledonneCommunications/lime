@@ -3724,12 +3724,62 @@ static void lime_multithread_delete_thread(manager_thread_arg thread_arg) {
 	belle_sip_object_unref(pool);	
 }
 
+static void lime_multithread_update_thread(manager_thread_arg thread_arg) {
+	auto pool = belle_sip_object_pool_push();
+
+	// RNG uniform between 25 and 100 ms
+	std::random_device rd;
+	std::mt19937 gen(rd());
+	std::uniform_int_distribution<> dis(25, 100);
+	std::uniform_int_distribution<> rnd_serverLimit(0, 4);
+
+	lime_tester::events_counters_t counters={};
+	int expected_success=0;
+	limeCallback callback([&counters](lime::CallbackReturn returnCode, std::string anythingToSay) {
+		if (returnCode == lime::CallbackReturn::success) {
+			counters.operation_success++;
+		} else {
+			counters.operation_failed++;
+			LIME_LOGE<<"Lime operation failed : "<<anythingToSay;
+		}
+	});
+
+	try {
+		auto localDeviceId = thread_arg.userlist[thread_arg.userIndex];
+		auto box = thread_arg.mailbox->find(localDeviceId)->second;
+
+		uint16_t serverLimit = 2;
+		uint16_t batchSize = 2;
+
+		while (box->done() == false) { // use the mailbox to synchronise to the end of the decryption threads
+			// wait for a random period betwwen 25 and 100 ms
+			std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+			// Update
+			thread_arg.manager->update(callback, serverLimit, batchSize);
+			expected_success++;
+			serverLimit+=rnd_serverLimit(gen); // improver server limit by a random 0 to 4
+			// make sure we process possible message incoming from X3DH server
+			std::unique_lock<std::recursive_mutex> lock(*(thread_arg.belle_sip_mutex));
+			belle_sip_stack_sleep(bc_stack,0);
+			lock.unlock();
+		}
+		BC_ASSERT_TRUE(lime_tester::wait_for_mutex(bc_stack,&counters.operation_success, expected_success, lime_tester::wait_for_timeout, thread_arg.belle_sip_mutex));
+
+	} catch (BctbxException &e) {
+		LIME_LOGE << e;
+		BC_FAIL("");
+	}
+
+	belle_sip_object_unref(pool);
+}
+
+
 
 /*
  * Scenario:
  * - Create 2 managers
  * - In separated threads, each manager create 2 devices
- * - each device gets 2 thread, one to send message to all of the others and one to decrypt them
+ * - each device gets several threads to encrypt/decrypt/update
  */
 static void lime_multithread_test(const lime::CurveId curve, const std::string &dbBaseFilename, const std::string &x3dh_server_url ) {
 	// create DB
@@ -3756,6 +3806,7 @@ static void lime_multithread_test(const lime::CurveId curve, const std::string &
 		deviceList[1] = *lime_tester::makeRandomDeviceName("alice.d2.");
 		deviceList[2] = *lime_tester::makeRandomDeviceName("bob.d1.");
 		deviceList[3] = *lime_tester::makeRandomDeviceName("bob.d2.");
+		std::deque<std::thread> activeThreads{};
 
 		// get a mailbox for each of them, same index
 		auto mailbox = make_shared<std::map<std::string, std::shared_ptr<mth_mailbox>>>();
@@ -3770,81 +3821,60 @@ static void lime_multithread_test(const lime::CurveId curve, const std::string &
 		auto bobManager = std::make_shared<LimeManager>(dbFilenameBob, X3DHServerPost_mutex);
 
 		// Create arguments to thread, as local variable, they are copy passed to threads
-		manager_thread_arg dev1Arg(aliceManager, 0, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
-		manager_thread_arg dev2Arg(aliceManager, 1, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
-		manager_thread_arg dev3Arg(bobManager, 2, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
-		manager_thread_arg dev4Arg(bobManager, 3, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
+		std::array<manager_thread_arg, 4> devArg {
+			manager_thread_arg(aliceManager, 0, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox),
+			manager_thread_arg(aliceManager, 1, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox),
+			manager_thread_arg(bobManager, 2, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox),
+			manager_thread_arg(bobManager, 3, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox)};
 
 		// create device
-		std::thread c1(lime_multithread_create_thread, dev1Arg);
-		std::thread c2(lime_multithread_create_thread, dev2Arg);
-		std::thread c3(lime_multithread_create_thread, dev3Arg);
-		std::thread c4(lime_multithread_create_thread, dev4Arg);
+		for (const auto &arg : devArg) {
+			activeThreads.emplace_back(lime_multithread_create_thread, arg);
+		}
 
 		// wait for the threads to complete
-		c1.join();
-		c2.join();
-		c3.join();
-		c4.join();
+		for (auto &t : activeThreads) {
+			t.join();
+		}
+		activeThreads.clear();
 
 		// encrypt, three encryotion threads per user
-		std::thread enc11(lime_multithread_encrypt_thread, dev1Arg);
-		std::thread enc12(lime_multithread_encrypt_thread, dev2Arg);
-		std::thread enc13(lime_multithread_encrypt_thread, dev3Arg);
-		std::thread enc14(lime_multithread_encrypt_thread, dev4Arg);
-		std::thread enc21(lime_multithread_encrypt_thread, dev1Arg);
-		std::thread enc22(lime_multithread_encrypt_thread, dev2Arg);
-		std::thread enc23(lime_multithread_encrypt_thread, dev3Arg);
-		std::thread enc24(lime_multithread_encrypt_thread, dev4Arg);
-		std::thread enc31(lime_multithread_encrypt_thread, dev1Arg);
-		std::thread enc32(lime_multithread_encrypt_thread, dev2Arg);
-		std::thread enc33(lime_multithread_encrypt_thread, dev3Arg);
-		std::thread enc34(lime_multithread_encrypt_thread, dev4Arg);
+		for (auto i=0; i<3; i++) {
+			for (const auto &arg : devArg) {
+				activeThreads.emplace_back(lime_multithread_encrypt_thread, arg);
+			}
+		}
 
 		// decrypt, two decryption threads per user
-		std::thread dec11(lime_multithread_decrypt_thread, dev1Arg);
-		std::thread dec12(lime_multithread_decrypt_thread, dev2Arg);
-		std::thread dec13(lime_multithread_decrypt_thread, dev3Arg);
-		std::thread dec14(lime_multithread_decrypt_thread, dev4Arg);
-		std::thread dec21(lime_multithread_decrypt_thread, dev1Arg);
-		std::thread dec22(lime_multithread_decrypt_thread, dev2Arg);
-		std::thread dec23(lime_multithread_decrypt_thread, dev3Arg);
-		std::thread dec24(lime_multithread_decrypt_thread, dev4Arg);
+		for (auto i=0; i<2; i++) {
+			for (const auto &arg : devArg) {
+				activeThreads.emplace_back(lime_multithread_decrypt_thread, arg);
+			}
+		}
+
+		//update, two threads per user
+		for (auto i=0; i<2; i++) {
+			for (const auto &arg : devArg) {
+				activeThreads.emplace_back(lime_multithread_update_thread, arg);
+			}
+		}
 
 		// wait for the threads to complete
-		enc11.join();
-		enc12.join();
-		enc13.join();
-		enc14.join();
-		enc21.join();
-		enc22.join();
-		enc23.join();
-		enc24.join();
-		enc31.join();
-		enc32.join();
-		enc33.join();
-		enc34.join();
-
-		dec11.join();
-		dec12.join();
-		dec13.join();
-		dec14.join();
-		dec21.join();
-		dec22.join();
-		dec23.join();
-		dec24.join();
+		for (auto &t : activeThreads) {
+			t.join();
+		}
+		activeThreads.clear();
 
 		// delete devices
-		std::thread d1(lime_multithread_delete_thread, dev1Arg);
-		std::thread d2(lime_multithread_delete_thread, dev2Arg);
-		std::thread d3(lime_multithread_delete_thread, dev3Arg);
-		std::thread d4(lime_multithread_delete_thread, dev4Arg);
+		for (const auto &arg : devArg) {
+			activeThreads.emplace_back(lime_multithread_delete_thread, arg);
+		}
 
 		// wait for the threads to complete
-		d1.join();
-		d2.join();
-		d3.join();
-		d4.join();
+		for (auto &t : activeThreads) {
+			t.join();
+		}
+		activeThreads.clear();
 
 		if (cleanDatabase) {
 			remove(dbFilenameAlice.data()); // delete the database file if already exists

@@ -222,6 +222,7 @@ namespace lime {
 	}
 
 	void LimeManager::delete_peerDevice(const std::string &peerDeviceId) {
+		std::lock_guard<std::mutex> lock(m_users_mutex);
 		// loop on all local users in cache to destroy any cached session linked to that user
 		for (auto userElem : m_users_cache) {
 			userElem.second->delete_peerDevice(peerDeviceId);
