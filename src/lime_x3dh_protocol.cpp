@@ -22,12 +22,12 @@
 #include "lime_x3dh_protocol.hpp"
 #include "lime_settings.hpp"
 #include "lime_impl.hpp"
-#include "lime_mutex.hpp"
 
 #include "bctoolbox/exception.hh"
 
 #include <iostream> // ostreamstring to generate incoming/outgoing messages debug trace
 #include <iomanip>
+#include <mutex>
 
 
 using namespace::std;
@@ -809,17 +809,14 @@ namespace lime {
 					// server response to a registerUser
 					// activate the local user
 					try {
-						m_mutex->lock();
+						std::lock_guard<std::mutex> lock(*m_mutex);
 						activate_user();
-						m_mutex->unlock();
 					} catch (BctbxException const &e) {
-						m_mutex->unlock();
 						LIME_LOGE<<"Cannot activate user "<< m_selfDeviceId << ". Backend says: "<< e.str();
 						if (callback) callback(lime::CallbackReturn::fail, std::string{"Cannot activate user : "}.append(e.str()));
 						cleanUserData(userData);
 						return;
 					} catch (exception const &e) { // catch all and let flow it up
-						m_mutex->unlock();
 						LIME_LOGE<<"Cannot activate user "<< m_selfDeviceId << ". Backend says: "<< e.what();
 						if (callback) callback(lime::CallbackReturn::fail, std::string{"Cannot activate user : "}.append(e.what()));
 						cleanUserData(userData);
@@ -850,16 +847,13 @@ namespace lime {
 						//Note: if while we were waiting for the peer bundle we did get an init message from him and created a session
 						// just do nothing : create a second session with the peer bundle we retrieved and at some point one session will stale
 						// when message stop crossing themselves on the network
-						m_mutex->lock();
+						std::lock_guard<std::mutex> lock(*m_mutex);
 						X3DH_init_sender_session(peersBundle);
-						m_mutex->unlock();
 					} catch (BctbxException &e) { // something went wrong, go for callback as this function may be called by code not supporting exceptions
-						m_mutex->unlock();
 						if (callback) callback(lime::CallbackReturn::fail, std::string{"Error during the peer Bundle processing : "}.append(e.str()));
 						cleanUserData(userData);
 						return;
 					} catch (exception const &e) { // catch all and let flow it up
-						m_mutex->unlock();
 						if (callback) callback(lime::CallbackReturn::fail, std::string{"Error during the peer Bundle processing : "}.append(e.what()));
 						cleanUserData(userData);
 						return;

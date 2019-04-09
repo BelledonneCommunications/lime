@@ -20,6 +20,7 @@
 #include "lime_log.hpp"
 #include <vector>
 #include <string>
+#include <mutex>
 #include "lime_settings.hpp"
 #include "lime/lime.hpp"
 #include "lime_keys.hpp"
@@ -534,13 +535,13 @@ int wait_for(belle_sip_stack_t*s1,int* counter,int value,int timeout) {
 }
 
 // same as above but multithread proof with a mutex
-int wait_for_mutex(belle_sip_stack_t*s1,int* counter,int value,int timeout, bctbx_mutex_t *mutex) {
+int wait_for_mutex(belle_sip_stack_t*s1,int* counter,int value,int timeout, std::shared_ptr<std::recursive_mutex> mutex) {
 	int retry=0;
 #define SLEEP_TIME 50
 	while (*counter!=value && retry++ <(timeout/SLEEP_TIME)) {
-		bctbx_mutex_lock(mutex);
+		std::unique_lock<std::recursive_mutex> lock(*mutex);
 		if (s1) belle_sip_stack_sleep(s1,SLEEP_TIME);
-		bctbx_mutex_unlock(mutex);
+		lock.unlock();
 	}
 	if (*counter!=value) return FALSE;
 	else return TRUE;

@@ -23,6 +23,7 @@
 #include <vector>
 #include <unordered_map>
 #include <queue>
+#include <mutex>
 
 #include "lime/lime.hpp"
 #include "lime_lime.hpp"
@@ -48,7 +49,7 @@ namespace lime {
 			/* general purpose */
 			std::shared_ptr<RNG> m_RNG; // Random Number Generator context
 			std::string m_selfDeviceId; // self device Id, shall be the GRUU
-			std::shared_ptr<LimeMutex> m_mutex; // a mutex held by the LimeManager owning the DB and shared along all lime users using the same DB
+			std::shared_ptr<std::mutex> m_mutex; // a mutex held by the LimeManager owning the DB and shared along all lime users using the same DB
 
 			/* X3DH keys */
 			DSApair<Curve> m_Ik; // our identity key pair, is loaded from DB only if requested(to sign a SPK or to perform X3DH init)
@@ -97,8 +98,8 @@ namespace lime {
 			void cleanUserData(std::shared_ptr<callbackUserData<Curve>> userData); // clean user data
 
 		public: /* Implement API defined in lime_lime.hpp in LimeGeneric abstract class */
-			Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<LimeMutex> &mutex);
-			Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, const long int Uid, std::shared_ptr<LimeMutex> &mutex);
+			Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<std::mutex> mutex);
+			Lime(std::unique_ptr<lime::Db> &&localStorage, const std::string &deviceId, const std::string &url, const limeX3DHServerPostData &X3DH_post_data, const long int Uid, std::shared_ptr<std::mutex> mutex);
 			~Lime();
 			Lime(Lime<Curve> &a) = delete; // can't copy a session, force usage of shared pointers
 			Lime<Curve> &operator=(Lime<Curve> &a) = delete; // can't copy a session

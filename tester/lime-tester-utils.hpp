@@ -21,7 +21,6 @@
 #define lime_tester_utils_hpp
 
 #include "bctoolbox/crypto.h"
-#include "bctoolbox/port.h"
 #include "lime_double_ratchet.hpp"
 #include "lime_localStorage.hpp"
 #include "belle-sip/belle-sip.h"
@@ -29,6 +28,7 @@
 
 #include "soci/sqlite3/soci-sqlite3.h"
 #include <random>
+#include <mutex>
 
 using namespace::lime;
 
@@ -155,7 +155,7 @@ struct events_counters_t {
 
 // wait for a counter to reach a value or timeout to occur, gives ticks to the belle-sip stack every SLEEP_TIME
 int wait_for(belle_sip_stack_t*s1,int* counter,int value,int timeout);
-int wait_for_mutex(belle_sip_stack_t*s1,int* counter,int value,int timeout, bctbx_mutex_t *mutex);
+int wait_for_mutex(belle_sip_stack_t*s1,int* counter,int value,int timeout, std::shared_ptr<std::recursive_mutex> mutex);
 
 // template instanciation are done in lime-tester-utils.cpp
 #ifdef EC25519_ENABLED

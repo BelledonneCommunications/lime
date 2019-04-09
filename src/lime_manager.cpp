@@ -23,34 +23,25 @@
 #include "lime_lime.hpp"
 #include "lime_localStorage.hpp"
 #include "lime_settings.hpp"
-#include "lime_mutex.hpp"
+#include <mutex>
 #include "bctoolbox/exception.hh"
 
 using namespace::std;
 
 namespace lime {
-	LimeManager::LimeManager(const std::string &db_access, const limeX3DHServerPostData &X3DH_post_data, const bool multithread)
-		: m_users_cache{}, m_db_access{db_access}, m_X3DH_post_data{X3DH_post_data}, m_mutex{std::make_shared<LimeMutex>(multithread)} { }
+	LimeManager::LimeManager(const std::string &db_access, const limeX3DHServerPostData &X3DH_post_data)
+		: m_users_cache{}, m_db_access{db_access}, m_X3DH_post_data{X3DH_post_data}, m_mutex{std::make_shared<std::mutex>()} { }
 
 	void LimeManager::load_user(std::shared_ptr<LimeGeneric> &user, const std::string &localDeviceId, const bool allStatus) {
-		try {
-			m_mutex->lock();
-			// Load user object
-			auto userElem = m_users_cache.find(localDeviceId);
-			if (userElem == m_users_cache.end()) { // not in cache, load it from DB
-				user = load_LimeUser(m_db_access, localDeviceId, m_X3DH_post_data, m_mutex, allStatus);
-				m_users_cache[localDeviceId]=user;
-			} else {
-				user = userElem->second;
-			}
-			m_mutex->unlock();
-		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
-			m_mutex->unlock();
-			throw e;
-		} catch (exception const &e) { // catch all and let flow it up
-			m_mutex->unlock();
-			// just leave the exception flow up
-			throw e;
+		// get the Lime manager lock
+		std::lock_guard<std::mutex> lock(*m_mutex);
+		// Load user object
+		auto userElem = m_users_cache.find(localDeviceId);
+		if (userElem == m_users_cache.end()) { // not in cache, load it from DB
+			user = load_LimeUser(m_db_access, localDeviceId, m_X3DH_post_data, m_mutex, allStatus);
+			m_users_cache[localDeviceId]=user;
+		} else {
+			user = userElem->second;
 		}
 	}
 
@@ -71,18 +62,10 @@ namespace lime {
 			// then check if it went well, if not delete the user from localDB
 			if (returnCode != lime::CallbackReturn::success) {
 				auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(thiz->m_db_access));
-				try {
-					thiz->m_mutex->lock();
-					localStorage->delete_LimeUser(localDeviceId);
-					thiz->m_mutex->unlock();
-				} catch (BctbxException const &e) { // catch BctbxException and let them flow up
-					thiz->m_mutex->unlock();
-					throw e;
-				} catch (exception const &e) { // catch all and let flow it up
-					thiz->m_mutex->unlock();
-					// just leave the exception flow up
-					throw e;
-				}
+				// get the Lime manager lock
+				std::lock_guard<std::mutex> lock(*(thiz->m_mutex));
+
+				localStorage->delete_LimeUser(localDeviceId);
 				thiz->m_users_cache.erase(localDeviceId);
 			}
 		});
@@ -136,21 +119,9 @@ namespace lime {
 		std::shared_ptr<LimeGeneric> user;
 		LimeManager::load_user(user, localDeviceId);
 
-		lime::PeerDeviceStatus ret = lime::PeerDeviceStatus::fail;
-		try {
-			m_mutex->lock();
-			// call the decryption function
-			ret = user->decrypt(recipientUserId, senderDeviceId, DRmessage, cipherMessage, plainMessage);
-			m_mutex->unlock();
-		} catch (BctbxException const &e) { // catch BctbxException and let them flow up
-			m_mutex->unlock();
-			throw e;
-		} catch (exception const &e) { // catch all and let flow it up
-			m_mutex->unlock();
-			// just leave the exception flow up
-			throw e;
-		}
-		return ret;
+		// get the Lime manager lock
+		std::lock_guard<std::mutex> lock(*m_mutex);
+		return user->decrypt(recipientUserId, senderDeviceId, DRmessage, cipherMessage, plainMessage);
 	}
 
 	// convenience definition, have a decrypt without cipherMessage input for the case we don't have it(DR message encryption policy)

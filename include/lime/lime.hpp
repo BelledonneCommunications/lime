@@ -24,6 +24,7 @@
 #include <vector>
 #include <functional>
 #include <string>
+#include <mutex>
 
 namespace lime {
 
@@ -115,8 +116,6 @@ namespace lime {
 
 	/* Forward declare the class managing one lime user*/
 	class LimeGeneric;
-	/* Forward declare the class providing mutex to enable multhreading */
-	class LimeMutex;
 
 	/** @brief Manage several Lime objects(one is needed for each local user).
 	 *
@@ -130,7 +129,7 @@ namespace lime {
 			std::string m_db_access; // DB access information forwarded to SOCI to correctly access database
 			limeX3DHServerPostData m_X3DH_post_data; // send data to the X3DH key server
 			void load_user(std::shared_ptr<LimeGeneric> &user, const std::string &localDeviceId, const bool allStatus=false); // helper function, get from m_users_cache of local Storage the requested Lime object
-			std::shared_ptr<LimeMutex> m_mutex; // manage multithreading - mostly db-access.
+			std::shared_ptr<std::mutex> m_mutex; // manage multithreading
 
 		public :
 
@@ -370,9 +369,8 @@ namespace lime {
 			 *
 			 * @param[in]	db_access	string used to access DB: can be filename for sqlite3 or access params for mysql, directly forwarded to SOCI session opening
 			 * @param[in]	X3DH_post_data	A function to send data to the X3DH server, parameters includes a callback to transfer back the server response
-			 * @param[in]	multithread	set this parameeter to true if lime runs in a multithreads environment
 			 */
-			LimeManager(const std::string &db_access, const limeX3DHServerPostData &X3DH_post_data, const bool multithread=true);
+			LimeManager(const std::string &db_access, const limeX3DHServerPostData &X3DH_post_data);
 
 			~LimeManager() = default;
 	};

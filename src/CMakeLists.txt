@@ -32,7 +32,6 @@ set(LIME_PRIVATE_HEADER_FILES
 	lime_lime.hpp
 	lime_crypto_primitives.hpp
 	lime_log.hpp
-	lime_mutex.hpp
 )
 set(LIME_SOURCE_FILES_CXX
 	lime.cpp

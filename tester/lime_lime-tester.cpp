@@ -23,7 +23,6 @@
 #include "lime-tester.hpp"
 #include "lime_keys.hpp"
 #include "lime-tester-utils.hpp"
-#include "lime_mutex.hpp"
 
 #include <bctoolbox/tester.h>
 #include <bctoolbox/exception.hh>
@@ -37,6 +36,7 @@
 #include <chrono>
 #include <thread>
 #include <deque>
+#include <mutex>
 
 using namespace::std;
 using namespace::lime;
@@ -3207,8 +3207,8 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 	auto Manager = std::unique_ptr<LimeManager>(new LimeManager(dbFilenameAlice, X3DHServerPost));
 	auto aliceDeviceName = lime_tester::makeRandomDeviceName("alice.");
 
-	// a disabled LimeMutex to feed internal functions
-	auto mutex = std::make_shared<LimeMutex>(false);
+	// a mutex to feed internal functions
+	auto m_mutex = std::make_shared<std::mutex>();
 
 	try {
 		/*Check if Alice exists in the database */
@@ -3223,7 +3223,7 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 		BC_ASSERT_TRUE(Manager->is_user(*aliceDeviceName));
 
 		/* load alice from from DB */
-		auto alice = load_LimeUser(dbFilenameAlice, *aliceDeviceName, X3DHServerPost, mutex);
+		auto alice = load_LimeUser(dbFilenameAlice, *aliceDeviceName, X3DHServerPost, m_mutex);
 		/* no need to wait here, it shall load alice immediately */
 
 		// Get alice x3dh server url
@@ -3247,7 +3247,7 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 	bool gotExpectedException = false;
 	/* Try to create the same user in the same data base, it must fail with exception raised */
 	try {
-		auto alice = insert_LimeUser(dbFilenameAlice, *aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, X3DHServerPost, callback, mutex);
+		auto alice = insert_LimeUser(dbFilenameAlice, *aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, X3DHServerPost, callback, m_mutex);
 		/* no need to wait here, it must fail immediately */
 	} catch (BctbxException &) {
 		gotExpectedException = true;
@@ -3261,7 +3261,7 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 	/* Try to load a user which is not in DB, it must fail with exception raised */
 	gotExpectedException = false;
 	try {
-		auto alice = load_LimeUser(dbFilenameAlice, "bob", X3DHServerPost, mutex);
+		auto alice = load_LimeUser(dbFilenameAlice, "bob", X3DHServerPost, m_mutex);
 		/* no need to wait here, it must fail immediately */
 	} catch (BctbxException &) {
 		gotExpectedException = true;
@@ -3302,7 +3302,7 @@ static void user_management_test(const lime::CurveId curve, const std::string &d
 
 	/* Create Alice again */
 	try {
-		std::shared_ptr<LimeGeneric> alice = insert_LimeUser(dbFilenameAlice, *aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, X3DHServerPost, callback, mutex);
+		std::shared_ptr<LimeGeneric> alice = insert_LimeUser(dbFilenameAlice, *aliceDeviceName, x3dh_server_url, curve, lime_tester::OPkInitialBatchSize, X3DHServerPost, callback, m_mutex);
 		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
 
 		// create another manager with a fresh DB
@@ -3514,29 +3514,25 @@ struct mth_message {
 };
 
 struct mth_mailbox {
-	bctbx_mutex_t mutex;
+	std::mutex b_mutex;
 	std::deque<mth_message> box;
 	std::string owner;
 
 	bool fetch(mth_message &m) {
-		bctbx_mutex_lock(&mutex);
+		std::lock_guard<std::mutex> lock(b_mutex);
 		if (box.size()>0) {
 			m = box.back();
 			box.pop_back();
-			bctbx_mutex_unlock(&mutex);
 			return true;
 		}
-		bctbx_mutex_unlock(&mutex);
 		return false;
 	}
 
 	void post(mth_message m) {
-		bctbx_mutex_lock(&mutex);
+		std::lock_guard<std::mutex> lock(b_mutex);
 		box.push_front(m);
-		bctbx_mutex_unlock(&mutex);
 	}
-	mth_mailbox(std::string &owner) : owner{owner} { bctbx_mutex_init(&mutex, NULL);}
-	~mth_mailbox() { bctbx_mutex_destroy(&mutex);}
+	mth_mailbox(std::string &owner) : owner{owner} {}
 };
 
 
@@ -3546,10 +3542,10 @@ struct manager_thread_arg {
 	std::array<std::string,4> userlist; // list of all users
 	std::string x3dh_server_url;
 	lime::CurveId curve;
-	bctbx_mutex_t *belle_sip_mutex; // A mutex to manage belle_sip http stack access
+	std::shared_ptr<std::recursive_mutex> belle_sip_mutex; // A mutex to manage belle_sip http stack access
 	std::shared_ptr<std::map<std::string, std::shared_ptr<mth_mailbox>>> mailbox; // mailbox system to post and fetch messages
 
-	manager_thread_arg(std::shared_ptr<LimeManager> manager, const uint8_t userIndex, const std::array<std::string, 4> &userlist, const std::string &x3dh_server_url, const lime::CurveId curve, bctbx_mutex_t *belle_sip_mutex, std::shared_ptr<std::map<std::string, std::shared_ptr<mth_mailbox>>> mailbox)
+	manager_thread_arg(std::shared_ptr<LimeManager> manager, const uint8_t userIndex, const std::array<std::string, 4> &userlist, const std::string &x3dh_server_url, const lime::CurveId curve, std::shared_ptr<std::recursive_mutex> belle_sip_mutex, std::shared_ptr<std::map<std::string, std::shared_ptr<mth_mailbox>>> mailbox)
 		: manager{manager}, userIndex{userIndex}, userlist{userlist},
 		x3dh_server_url{x3dh_server_url}, curve{curve}, belle_sip_mutex{belle_sip_mutex},
 		mailbox{mailbox}	{};
@@ -3557,31 +3553,30 @@ struct manager_thread_arg {
 
 static constexpr size_t test_multithread_message_number = 10;
 
-static void *lime_multithread_decrypt_thread(void *arg) {
-	manager_thread_arg *thread_arg = static_cast<manager_thread_arg *>(arg);
+static void lime_multithread_decrypt_thread(manager_thread_arg thread_arg) {
 
 	int decrypted_messages = 3*test_multithread_message_number; // we expect 3 times each message from patterns
 
 	auto pool = belle_sip_object_pool_push();
 
-	// RNG uniform between 10 and 200 ms
+	// RNG uniform between 10 and 400 ms
 	std::random_device rd;
 	std::mt19937 gen(rd());
-	std::uniform_int_distribution<> dis(10, 200);
+	std::uniform_int_distribution<> dis(10, 400);
 
 	try {
-		auto localDeviceId = thread_arg->userlist[thread_arg->userIndex];
-		auto box = thread_arg->mailbox->find(localDeviceId)->second;
+		auto localDeviceId = thread_arg.userlist[thread_arg.userIndex];
+		auto box = thread_arg.mailbox->find(localDeviceId)->second;
 
 		// loop on all patterns available
 		while (decrypted_messages>0) {
-			// wait for a random period betwwen 10 and 200 ms
+			// wait for a random period betwwen 10 and 400 ms
 			std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
 			// Fetch mailbox
 			mth_message m{};
 			while (box->fetch(m)) {
 				std::vector<uint8_t> receivedMessage{};
-				BC_ASSERT_TRUE(thread_arg->manager->decrypt(localDeviceId, "friends", m.senderId, m.DRmessage, m.cipherMessage, receivedMessage) != lime::PeerDeviceStatus::fail);
+				BC_ASSERT_TRUE(thread_arg.manager->decrypt(localDeviceId, "friends", m.senderId, m.DRmessage, m.cipherMessage, receivedMessage) != lime::PeerDeviceStatus::fail);
 				std::string receivedMessageString{receivedMessage.begin(), receivedMessage.end()};
 				BC_ASSERT_TRUE(receivedMessageString == m.plainMessage);
 				decrypted_messages--;
@@ -3594,11 +3589,9 @@ static void *lime_multithread_decrypt_thread(void *arg) {
 	}
 
 	belle_sip_object_unref(pool);
-	return NULL;
 }
 
-static void *lime_multithread_encrypt_thread(void *arg) {
-	manager_thread_arg *thread_arg = static_cast<manager_thread_arg *>(arg);
+static void lime_multithread_encrypt_thread(manager_thread_arg thread_arg) {
 	lime_tester::events_counters_t counters={};
 	int expected_success=0;
 	limeCallback callback([&counters](lime::CallbackReturn returnCode, std::string anythingToSay) {
@@ -3623,18 +3616,18 @@ static void *lime_multithread_encrypt_thread(void *arg) {
 			std::this_thread::sleep_for(std::chrono::microseconds(dis(gen)));
 			// Encrypt to all but me
 			auto recipients = make_shared<std::vector<RecipientData>>();
-			for (size_t i=0; i<thread_arg->userlist.size(); i++) {
-				if (i != thread_arg->userIndex) { // do not encrypt to myself
-					recipients->emplace_back(thread_arg->userlist[i]);
+			for (size_t i=0; i<thread_arg.userlist.size(); i++) {
+				if (i != thread_arg.userIndex) { // do not encrypt to myself
+					recipients->emplace_back(thread_arg.userlist[i]);
 				}
 			}
 
 			auto messagePtr = make_shared<const std::vector<uint8_t>>(message->begin(), message->end());
 			auto cipherMessage = make_shared<std::vector<uint8_t>>();
-			auto localDeviceId = thread_arg->userlist[thread_arg->userIndex];
-			auto mailbox = thread_arg->mailbox;
+			auto localDeviceId = thread_arg.userlist[thread_arg.userIndex];
+			auto mailbox = thread_arg.mailbox;
 			// encrypt to all, use a generic "friends" id as recipient user id
-			thread_arg->manager->encrypt(localDeviceId, make_shared<const std::string>("friends"), recipients, messagePtr, cipherMessage,
+			thread_arg.manager->encrypt(localDeviceId, make_shared<const std::string>("friends"), recipients, messagePtr, cipherMessage,
 					([&counters, message, localDeviceId, mailbox, recipients, cipherMessage](lime::CallbackReturn returnCode, std::string anythingToSay) {
 						if (returnCode == lime::CallbackReturn::success) {
 							// Post the messages
@@ -3654,11 +3647,11 @@ static void *lime_multithread_encrypt_thread(void *arg) {
 					}));
 			expected_success++;
 			// make sure we process possible message incoming from X3DH server
-			bctbx_mutex_lock(thread_arg->belle_sip_mutex);
+			std::unique_lock<std::recursive_mutex> lock(*(thread_arg.belle_sip_mutex));
 			belle_sip_stack_sleep(bc_stack,0);
-			bctbx_mutex_unlock(thread_arg->belle_sip_mutex);
+			lock.unlock();
 		}
-		BC_ASSERT_TRUE(lime_tester::wait_for_mutex(bc_stack,&counters.operation_success, expected_success, lime_tester::wait_for_timeout, thread_arg->belle_sip_mutex));
+		BC_ASSERT_TRUE(lime_tester::wait_for_mutex(bc_stack,&counters.operation_success, expected_success, lime_tester::wait_for_timeout, thread_arg.belle_sip_mutex));
 
 	} catch (BctbxException &e) {
 		LIME_LOGE << e;
@@ -3666,11 +3659,9 @@ static void *lime_multithread_encrypt_thread(void *arg) {
 	}
 
 	belle_sip_object_unref(pool);	
-	return NULL;
 }
 
-static void *lime_multithread_create_thread(void *arg) {
-	manager_thread_arg *thread_arg = static_cast<manager_thread_arg *>(arg);
+static void lime_multithread_create_thread(manager_thread_arg thread_arg) {
 	lime_tester::events_counters_t counters={};
 	int expected_success=0;
 	limeCallback callback([&counters](lime::CallbackReturn returnCode, std::string anythingToSay) {
@@ -3686,20 +3677,18 @@ static void *lime_multithread_create_thread(void *arg) {
 
 	try {
 		// Create the device
-		auto deviceId = thread_arg->userlist[thread_arg->userIndex];
-		thread_arg->manager->create_user(deviceId, thread_arg->x3dh_server_url, thread_arg->curve, lime_tester::OPkInitialBatchSize, callback);
-		BC_ASSERT_TRUE(lime_tester::wait_for_mutex(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout, thread_arg->belle_sip_mutex));
+		auto deviceId = thread_arg.userlist[thread_arg.userIndex];
+		thread_arg.manager->create_user(deviceId, thread_arg.x3dh_server_url, thread_arg.curve, lime_tester::OPkInitialBatchSize, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for_mutex(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout, thread_arg.belle_sip_mutex));
 	} catch (BctbxException &e) {
 		LIME_LOGE << e;
 		BC_FAIL("");
 	}
 
 	belle_sip_object_unref(pool);	
-	return NULL;
 }
 
-static void *lime_multithread_delete_thread(void *arg) {
-	manager_thread_arg *thread_arg = static_cast<manager_thread_arg *>(arg);
+static void lime_multithread_delete_thread(manager_thread_arg thread_arg) {
 	lime_tester::events_counters_t counters={};
 	int expected_success=0;
 	limeCallback callback([&counters](lime::CallbackReturn returnCode, std::string anythingToSay) {
@@ -3715,15 +3704,14 @@ static void *lime_multithread_delete_thread(void *arg) {
 
 	try {
 		// Delete the device
-		thread_arg->manager->delete_user(thread_arg->userlist[thread_arg->userIndex], callback);
-		BC_ASSERT_TRUE(lime_tester::wait_for_mutex(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout, thread_arg->belle_sip_mutex));
+		thread_arg.manager->delete_user(thread_arg.userlist[thread_arg.userIndex], callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for_mutex(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout, thread_arg.belle_sip_mutex));
 	} catch (BctbxException &e) {
 		LIME_LOGE << e;
 		BC_FAIL("");
 	}
 
 	belle_sip_object_unref(pool);	
-	return NULL;
 }
 
 
@@ -3743,15 +3731,11 @@ static void lime_multithread_test(const lime::CurveId curve, const std::string &
 	remove(dbFilenameAlice.data()); // delete the database file if already exists
 	remove(dbFilenameBob.data()); // delete the database file if already exists
 
-	bctbx_thread_t dev1ThreadId, dev2ThreadId, dev3ThreadId, dev4ThreadId;
-	bctbx_thread_t dev5ThreadId, dev6ThreadId, dev7ThreadId, dev8ThreadId;
-	bctbx_mutex_t *belle_sip_mutex = new bctbx_mutex_t(); // a mutex for belle-sip operations
-	bctbx_mutex_init(belle_sip_mutex, NULL);
+	auto belle_sip_mutex = make_shared<std::recursive_mutex>(); // a mutex for belle-sip operations, must be recursive a stack processing may trigger response reception wich may trigger message sending
 
 	limeX3DHServerPostData X3DHServerPost_mutex([belle_sip_mutex](const std::string &url, const std::string &from, const std::vector<uint8_t> &message, const limeX3DHServerResponseProcess &responseProcess){
-			bctbx_mutex_lock(belle_sip_mutex);
+			std::lock_guard<std::recursive_mutex> lock(*belle_sip_mutex); // belle_sip_mutex is recursive so a thread can acquire the lock there even if it already got it from a stack processing
 			X3DHServerPost(url, from, message, responseProcess);
-			bctbx_mutex_unlock(belle_sip_mutex);
 			});
 
 
@@ -3773,63 +3757,58 @@ static void lime_multithread_test(const lime::CurveId curve, const std::string &
 		// create Manager
 		auto aliceManager = std::make_shared<LimeManager>(dbFilenameAlice, X3DHServerPost_mutex);
 		auto bobManager = std::make_shared<LimeManager>(dbFilenameBob, X3DHServerPost_mutex);
-		manager_thread_arg *dev1Arg = new manager_thread_arg(aliceManager, 0, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
-		manager_thread_arg *dev2Arg = new manager_thread_arg(aliceManager, 1, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
-		manager_thread_arg *dev3Arg = new manager_thread_arg(bobManager, 2, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
-		manager_thread_arg *dev4Arg = new manager_thread_arg(bobManager, 3, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
+
+		// Create arguments to thread, as local variable, they are copy passed to threads
+		manager_thread_arg dev1Arg(aliceManager, 0, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
+		manager_thread_arg dev2Arg(aliceManager, 1, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
+		manager_thread_arg dev3Arg(bobManager, 2, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
+		manager_thread_arg dev4Arg(bobManager, 3, deviceList, x3dh_server_url, curve, belle_sip_mutex, mailbox);
 
 		// create device
-		bctbx_thread_create(&dev1ThreadId, NULL, &lime_multithread_create_thread, dev1Arg);
-		bctbx_thread_create(&dev2ThreadId, NULL, &lime_multithread_create_thread, dev2Arg);
-		bctbx_thread_create(&dev3ThreadId, NULL, &lime_multithread_create_thread, dev3Arg);
-		bctbx_thread_create(&dev4ThreadId, NULL, &lime_multithread_create_thread, dev4Arg);
+		std::thread c1(lime_multithread_create_thread, dev1Arg);
+		std::thread c2(lime_multithread_create_thread, dev2Arg);
+		std::thread c3(lime_multithread_create_thread, dev3Arg);
+		std::thread c4(lime_multithread_create_thread, dev4Arg);
 
-		void *res;
 		// wait for the threads to complete
-		bctbx_thread_join(dev1ThreadId, &res);
-		bctbx_thread_join(dev2ThreadId, &res);
-		bctbx_thread_join(dev3ThreadId, &res);
-		bctbx_thread_join(dev4ThreadId, &res);
+		c1.join();
+		c2.join();
+		c3.join();
+		c4.join();
 
 		// encrypt
-		bctbx_thread_create(&dev1ThreadId, NULL, &lime_multithread_encrypt_thread, dev1Arg);
-		bctbx_thread_create(&dev2ThreadId, NULL, &lime_multithread_encrypt_thread, dev2Arg);
-		bctbx_thread_create(&dev3ThreadId, NULL, &lime_multithread_encrypt_thread, dev3Arg);
-		bctbx_thread_create(&dev4ThreadId, NULL, &lime_multithread_encrypt_thread, dev4Arg);
+		std::thread t1(lime_multithread_encrypt_thread, dev1Arg);
+		std::thread t2(lime_multithread_encrypt_thread, dev2Arg);
+		std::thread t3(lime_multithread_encrypt_thread, dev3Arg);
+		std::thread t4(lime_multithread_encrypt_thread, dev4Arg);
 
 		// decrypt
-		bctbx_thread_create(&dev5ThreadId, NULL, &lime_multithread_decrypt_thread, dev1Arg);
-		bctbx_thread_create(&dev6ThreadId, NULL, &lime_multithread_decrypt_thread, dev2Arg);
-		bctbx_thread_create(&dev7ThreadId, NULL, &lime_multithread_decrypt_thread, dev3Arg);
-		bctbx_thread_create(&dev8ThreadId, NULL, &lime_multithread_decrypt_thread, dev4Arg);
+		std::thread t5(lime_multithread_decrypt_thread, dev1Arg);
+		std::thread t6(lime_multithread_decrypt_thread, dev2Arg);
+		std::thread t7(lime_multithread_decrypt_thread, dev3Arg);
+		std::thread t8(lime_multithread_decrypt_thread, dev4Arg);
 
 		// wait for the threads to complete
-		bctbx_thread_join(dev1ThreadId, &res);
-		bctbx_thread_join(dev2ThreadId, &res);
-		bctbx_thread_join(dev3ThreadId, &res);
-		bctbx_thread_join(dev4ThreadId, &res);
-		bctbx_thread_join(dev5ThreadId, &res);
-		bctbx_thread_join(dev6ThreadId, &res);
-		bctbx_thread_join(dev7ThreadId, &res);
-		bctbx_thread_join(dev8ThreadId, &res);
-
+		t1.join();
+		t2.join();
+		t3.join();
+		t4.join();
+		t5.join();
+		t6.join();
+		t7.join();
+		t8.join();
 
 		// delete devices
-		bctbx_thread_create(&dev1ThreadId, NULL, &lime_multithread_delete_thread, dev1Arg);
-		bctbx_thread_create(&dev2ThreadId, NULL, &lime_multithread_delete_thread, dev2Arg);
-		bctbx_thread_create(&dev3ThreadId, NULL, &lime_multithread_delete_thread, dev3Arg);
-		bctbx_thread_create(&dev4ThreadId, NULL, &lime_multithread_delete_thread, dev4Arg);
+		std::thread d1(lime_multithread_delete_thread, dev1Arg);
+		std::thread d2(lime_multithread_delete_thread, dev2Arg);
+		std::thread d3(lime_multithread_delete_thread, dev3Arg);
+		std::thread d4(lime_multithread_delete_thread, dev4Arg);
 
 		// wait for the threads to complete
-		bctbx_thread_join(dev1ThreadId, &res);
-		bctbx_thread_join(dev2ThreadId, &res);
-		bctbx_thread_join(dev3ThreadId, &res);
-		bctbx_thread_join(dev4ThreadId, &res);
-
-		delete dev1Arg;
-		delete dev2Arg;
-		delete dev3Arg;
-		delete dev4Arg;
+		d1.join();
+		d2.join();
+		d3.join();
+		d4.join();
 
 		if (cleanDatabase) {
 			remove(dbFilenameAlice.data()); // delete the database file if already exists
@@ -3839,9 +3818,6 @@ static void lime_multithread_test(const lime::CurveId curve, const std::string &
 		LIME_LOGE << e;
 		BC_FAIL("");
 	}
-
-	bctbx_mutex_destroy(belle_sip_mutex);
-	delete belle_sip_mutex;
 }
 
 static void lime_multithread(void) {
