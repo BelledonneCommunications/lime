@@ -370,7 +370,7 @@ namespace lime {
 			 *
 			 * @param[in]	db_access	string used to access DB: can be filename for sqlite3 or access params for mysql, directly forwarded to SOCI session opening
 			 * @param[in]	X3DH_post_data	A function to send data to the X3DH server, parameters includes a callback to transfer back the server response
-			 * @param[in]	dn_mutex	a mutex used to lock database access. Is optionnal: if not given, the manager will produce one internally
+			 * @param[in]	db_mutex	a mutex used to lock database access. Is optionnal: if not given, the manager will produce one internally
 			 */
 			LimeManager(const std::string &db_access, const limeX3DHServerPostData &X3DH_post_data, std::shared_ptr<std::recursive_mutex> db_mutex);
 			/**
