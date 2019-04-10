@@ -93,17 +93,16 @@ namespace lime {
 	template <typename Curve>
 	void Lime<Curve>::publish_user(const limeCallback &callback, const uint16_t OPkInitialBatchSize) {
 		auto userData = make_shared<callbackUserData<Curve>>(this->shared_from_this(), callback, OPkInitialBatchSize);
-
+		get_SelfIdentityKey(); // make sure our Ik is loaded in object
+		// Generate (or load if they already are in base when publishing an inactive user) the SPk
 		X<Curve, lime::Xtype::publicKey> SPk{};
 		DSA<Curve, lime::DSAtype::signature> SPk_sig{};
 		uint32_t SPk_id=0;
+		X3DH_generate_SPk(SPk, SPk_sig, SPk_id, true);
+
+		// Generate (or load if they already are in base when publishing an inactive user) the OPks
 		std::vector<X<Curve, lime::Xtype::publicKey>> OPks{};
 		std::vector<uint32_t> OPk_ids{};
-
-		get_SelfIdentityKey(); // make sure our Ik is loaded in object
-		/* Generate (or load if they already are in base when publishing an inactive user) the SPk */
-		X3DH_generate_SPk(SPk, SPk_sig, SPk_id, true);
-		// Generate (or load if they already are in base when publishing an inactive user) the OPks
 		X3DH_generate_OPks(OPks, OPk_ids, OPkInitialBatchSize, true);
 
 		// Build and post the message to server
@@ -400,7 +399,7 @@ namespace lime {
 #endif
 
 		/* open DB */
-		std::unique_ptr<lime::Db> localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilename, db_mutex)); // create as unique ptr, ownership is then passed to the Lime structure when instanciated
+		auto localStorage = std::unique_ptr<lime::Db>(new lime::Db(dbFilename, db_mutex)); // create as unique ptr, ownership is then passed to the Lime structure when instanciated
 
 		try {
 			//instanciate the correct Lime object

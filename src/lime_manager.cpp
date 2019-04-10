@@ -126,7 +126,7 @@ namespace lime {
 		std::shared_ptr<LimeGeneric> user;
 		LimeManager::load_user(user, localDeviceId);
 
-		// get the Lime manager lock
+		// call the decryption function
 		return user->decrypt(recipientUserId, senderDeviceId, DRmessage, cipherMessage, plainMessage);
 	}
 

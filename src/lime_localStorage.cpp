@@ -686,7 +686,6 @@ bool DR<DHKey>::session_save() {
 		}
 	}
 
-
 	// Shall we insert some skipped Message keys?
 	for ( const auto &rChain : m_mkskipped) { // loop all chains of message keys, each one is a DHr associated to an unordered map of MK indexed by Nr to be saved
 		blob DHr(m_localStorage->sql);
