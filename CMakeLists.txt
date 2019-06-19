@@ -25,7 +25,7 @@ include(CheckLibraryExists)
 include(CMakePushCheckState)
 include(CMakePackageConfigHelpers)
 
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.1)
 
 option(ENABLE_SHARED "Build shared library." YES)
 option(ENABLE_STATIC "Build static library." YES)
