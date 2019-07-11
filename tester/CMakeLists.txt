@@ -24,6 +24,8 @@ add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 
 find_package(BelleSIP REQUIRED CONFIG)
 
+add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+
 if(ENABLE_SHARED)
 	set(LIME_LIBRARIES_FOR_TESTER lime)
 else()
