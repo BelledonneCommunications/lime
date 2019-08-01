@@ -56,7 +56,7 @@ if(ANDROID OR IOS)
 	add_library(limetester SHARED ${HEADER_FILES_CXX} ${SOURCE_FILES_CXX} ${SOURCE_FILES_C} )
 	target_link_libraries(limetester PRIVATE bctoolbox bctoolbox-tester ${BELLESIP_TARGETNAME} ${LIME_LIBRARIES_FOR_TESTER} ${SOCI_LIBRARIES} ${SOCI_sqlite3_PLUGIN} ${CMAKE_THREAD_LIBS_INIT})
 	if(IOS)
-		target_link_libraries(limetester sqlite3)
+		target_link_libraries(limetester PRIVATE sqlite3)
 		set(MIN_OS ${LINPHONE_IOS_DEPLOYMENT_TARGET})
 		set_target_properties(limetester PROPERTIES
 			FRAMEWORK TRUE
