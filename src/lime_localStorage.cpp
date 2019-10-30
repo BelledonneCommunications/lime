@@ -454,6 +454,19 @@ lime::PeerDeviceStatus Db::get_peerDeviceStatus(const std::string &peerDeviceId)
 }
 
 /**
+ * @brief checks if a device Id exists in the local users table
+ *
+ * @param[in]	deviceId	The device Id
+ *
+ * @return true if it exists, false otherwise
+ */
+bool Db::is_localUser(const std::string &deviceId) {
+	std::lock_guard<std::recursive_mutex> lock(*m_db_mutex);
+	sql<<"SELECT count(*) FROM Lime_LocalUsers WHERE UserId = :deviceId LIMIT 1;", use(deviceId);
+	return sql.got_data();
+}
+
+/**
  * @brief delete a peerDevice from local storage
  *
  * @param[in]	peerDeviceId	The device Id to be removed from local storage, shall be its GRUU
