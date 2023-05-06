@@ -20,6 +20,8 @@
 #ifndef lime_settings_hpp
 #define lime_settings_hpp
 
+#include <cstdint>
+
 namespace lime {
 /** @brief Hold constants definition used as settings in all components of the lime library
  *
