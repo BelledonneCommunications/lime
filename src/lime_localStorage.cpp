@@ -1,5 +1,5 @@
 /*
-	lime_x3dh.cpp
+	lime_localStorage.cpp
 	@author Johan Pascal
 	@copyright	Copyright (C) 2017  Belledonne Communications SARL
 
@@ -782,7 +782,7 @@ bool DR<Curve>::session_save(bool commit) { // commit default to true
 				m_peerDid = m_localStorage->store_peerDevice(m_peerDeviceId, m_peerIk);
 			} else {
 				// make sure we have no other session active with this pair local,peer DiD
-				m_localStorage->sql<<"UPDATE DR_sessions SET Status = 0, timeStamp = CURRENT_TIMESTAMP WHERE Did = :Did AND Uid = :Uid", use(m_peerDid), use(m_db_Uid);
+				m_localStorage->sql<<"UPDATE DR_sessions SET Status = 0, timeStamp = CURRENT_TIMESTAMP WHERE Status = 1 AND Did = :Did AND Uid = :Uid", use(m_peerDid), use(m_db_Uid);
 			}
 
 			if (m_X3DH_initMessage.size()>0) {
@@ -813,7 +813,7 @@ bool DR<Curve>::session_save(bool commit) { // commit default to true
 				{
 					// make sure we have no other session active with this pair local,peer DiD
 					if (m_active_status == false) {
-						m_localStorage->sql<<"UPDATE DR_sessions SET Status = 0, timeStamp = CURRENT_TIMESTAMP WHERE Did = :Did AND Uid = :Uid", use(m_peerDid), use(m_db_Uid);
+						m_localStorage->sql<<"UPDATE DR_sessions SET Status = 0, timeStamp = CURRENT_TIMESTAMP WHERE Status = 1 AND Did = :Did AND Uid = :Uid", use(m_peerDid), use(m_db_Uid);
 						m_active_status = true;
 					}
 
@@ -837,7 +837,7 @@ bool DR<Curve>::session_save(bool commit) { // commit default to true
 				{
 					// make sure we have no other session active with this pair local,peer DiD
 					if (m_active_status == false) {
-						m_localStorage->sql<<"UPDATE DR_sessions SET Status = 0, timeStamp = CURRENT_TIMESTAMP WHERE Did = :Did AND Uid = :Uid", use(m_peerDid), use(m_db_Uid);
+						m_localStorage->sql<<"UPDATE DR_sessions SET Status = 0, timeStamp = CURRENT_TIMESTAMP WHERE Status = 1 AND Did = :Did AND Uid = :Uid", use(m_peerDid), use(m_db_Uid);
 						m_active_status = true;
 					}
 

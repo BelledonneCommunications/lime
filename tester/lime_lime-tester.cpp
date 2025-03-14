@@ -4255,6 +4255,198 @@ static void lime_session_cancel(void) {
 #endif
 }
 
+/*
+ * Scenario
+ * - Establish a session between Alice and Bob
+ * - Alice encrypts to Bob, check it does not holds a X3DH init message
+ * - Alice stale session with bob
+ * - Alice encrypts to Bob, check it does holds a X3DH init message. Bob decrypts
+ * - Check Alice and Bob have two DR sessions, one active one not
+ * - Update Alice and Bob, and check again the sessions
+ * - fast forward Alice and Bob by DRSession_limboTime_days -1 days
+ * - Update Alice and Bob, and check again the sessions
+ * - Alice stale session with bob
+ * - Alice encrypts to Bob, check it does holds a X3DH init message. Bob decrypts
+ * - Check Alice and Bob have three DR sessions, one active two not
+ * - fast forward Alice and Bob by 2 days so we shall have one session inactive session older than DRSession_limboTime_days, one younger and one active
+ * - Update Alice and Bob, and check again the sessions : the older one shall have been cleaned
+ */
+static void lime_DR_session_clean_test(const lime::CurveId curve, const std::string &dbBaseFilename, const std::string &x3dh_server_url, bool continuousSession=true) {
+	std::string dbFilenameAlice;
+	std::shared_ptr<std::string> aliceDeviceId;
+	std::unique_ptr<LimeManager> aliceManager;
+	std::string dbFilenameBob;
+	std::shared_ptr<std::string> bobDeviceId;
+	std::unique_ptr<LimeManager> bobManager;
+
+	lime_tester::events_counters_t counters={};
+	int expected_success=0;
+
+	limeCallback callback = [&counters](lime::CallbackReturn returnCode, std::string anythingToSay) {
+					if (returnCode == lime::CallbackReturn::success) {
+						counters.operation_success++;
+					} else {
+						counters.operation_failed++;
+						LIME_LOGE<<"Lime operation failed : "<<anythingToSay;
+					}
+				};
+
+	try {
+		lime_session_establishment(curve, dbBaseFilename, x3dh_server_url,
+					dbFilenameAlice, aliceDeviceId, aliceManager,
+					dbFilenameBob, bobDeviceId, bobManager);
+
+		/* Alice encrypts to Bob */
+		auto aliceRecipients = make_shared<std::vector<RecipientData>>();
+		aliceRecipients->emplace_back(*bobDeviceId);
+		auto aliceMessage = make_shared<const std::vector<uint8_t>>(lime_tester::messages_pattern[0].begin(), lime_tester::messages_pattern[0].end());
+		auto aliceCipherMessage = make_shared<std::vector<uint8_t>>();
+		aliceManager->encrypt(*aliceDeviceId, make_shared<const std::string>("bob"), aliceRecipients, aliceMessage, aliceCipherMessage, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+		BC_ASSERT_FALSE(lime_tester::DR_message_holdsX3DHInit((*aliceRecipients)[0].DRmessage)); // no X3DH init as this session is fully established
+
+		/* force reset so the active session is not in cache anymore */
+		if (!continuousSession) { managersClean (aliceManager, bobManager, dbFilenameAlice, dbFilenameBob);}
+
+		/* Alice stale session with Bob */
+		aliceManager->stale_sessions(*aliceDeviceId, *bobDeviceId);
+
+		/* force reset so the active session is not in cache anymore */
+		if (!continuousSession) { managersClean (aliceManager, bobManager, dbFilenameAlice, dbFilenameBob);}
+
+		/* Alice encrypts to Bob again: she creates a new session */
+		aliceRecipients->clear();
+		aliceRecipients->emplace_back(*bobDeviceId);
+		aliceMessage = make_shared<const std::vector<uint8_t>>(lime_tester::messages_pattern[1].begin(), lime_tester::messages_pattern[1].end());
+		aliceCipherMessage->clear();
+		aliceManager->encrypt(*aliceDeviceId, make_shared<const std::string>("bob"), aliceRecipients, aliceMessage, aliceCipherMessage, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+		BC_ASSERT_TRUE(lime_tester::DR_message_holdsX3DHInit((*aliceRecipients)[0].DRmessage)); // X3DH init message in, it is a new session
+		/* Bob decrypts: he creates a new session staling the old one */
+		std::vector<uint8_t> receivedMessage{};
+		BC_ASSERT_TRUE(bobManager->decrypt(*bobDeviceId, "bob", *aliceDeviceId, (*aliceRecipients)[0].DRmessage, *aliceCipherMessage, receivedMessage) != lime::PeerDeviceStatus::fail);
+		auto receivedMessageString = std::string{receivedMessage.begin(), receivedMessage.end()};
+		BC_ASSERT_TRUE(receivedMessageString == lime_tester::messages_pattern[1]);
+
+		/* force reset so the active session is not in cache anymore */
+		if (!continuousSession) { managersClean (aliceManager, bobManager, dbFilenameAlice, dbFilenameBob);}
+
+		/* Check Alice and Bob db holds 2 DR session, one active, one not */
+		std::vector<long int> sessionsId;
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0); // don't return 0 -> one session is active
+		BC_ASSERT_TRUE(sessionsId.size() == 2); // We have a total of 2 sessions
+		sessionsId.clear();
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0);
+		BC_ASSERT_TRUE(sessionsId.size() == 2);
+
+		// Update Alice and Bob
+		aliceManager->update(*aliceDeviceId, callback, 0, lime_tester::OPkInitialBatchSize);
+		bobManager->update(*bobDeviceId, callback, 0, lime_tester::OPkInitialBatchSize);
+		expected_success+=2;
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success,lime_tester::wait_for_timeout));
+
+		/* force reset so the active session is not in cache anymore */
+		if (!continuousSession) { managersClean (aliceManager, bobManager, dbFilenameAlice, dbFilenameBob);}
+
+		/* Check Alice and Bob db holds 2 DR session, one active, one not */
+		sessionsId.clear();
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0); // don't return 0 -> one session is active
+		BC_ASSERT_TRUE(sessionsId.size() == 2); // We have a total of 2 sessions
+		sessionsId.clear();
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0);
+		BC_ASSERT_TRUE(sessionsId.size() == 2);
+
+		// forward time by DRSession_limboTime_days - 1
+		lime_tester::forwardTime(dbFilenameAlice, lime::settings::DRSession_limboTime_days - 1);
+		lime_tester::forwardTime(dbFilenameBob, lime::settings::DRSession_limboTime_days - 1);
+
+		// Update Alice and Bob
+		aliceManager->update(*aliceDeviceId, callback, 0, lime_tester::OPkInitialBatchSize);
+		bobManager->update(*bobDeviceId, callback, 0, lime_tester::OPkInitialBatchSize);
+		expected_success+=2;
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success,lime_tester::wait_for_timeout));
+
+		/* Check Alice and Bob db holds 2 DR session, one active, one not */
+		sessionsId.clear();
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0); // don't return 0 -> one session is active
+		BC_ASSERT_TRUE(sessionsId.size() == 2); // We have a total of 2 sessions
+		sessionsId.clear();
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0);
+		BC_ASSERT_TRUE(sessionsId.size() == 2);
+
+		/* force reset so the active session is not in cache anymore */
+		if (!continuousSession) { managersClean (aliceManager, bobManager, dbFilenameAlice, dbFilenameBob);}
+
+		/* Alice stale session with Bob */
+		aliceManager->stale_sessions(*aliceDeviceId, *bobDeviceId);
+
+		/* Alice encrypts to Bob again: she creates a new session */
+		aliceRecipients->clear();
+		aliceRecipients->emplace_back(*bobDeviceId);
+		aliceMessage = make_shared<const std::vector<uint8_t>>(lime_tester::messages_pattern[2].begin(), lime_tester::messages_pattern[2].end());
+		aliceCipherMessage->clear();
+		aliceManager->encrypt(*aliceDeviceId, make_shared<const std::string>("bob"), aliceRecipients, aliceMessage, aliceCipherMessage, callback);
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,++expected_success,lime_tester::wait_for_timeout));
+		BC_ASSERT_TRUE(lime_tester::DR_message_holdsX3DHInit((*aliceRecipients)[0].DRmessage)); // X3DH init message in, it is a new session
+		/* Bob decrypts: he creates a new session staling the old one */
+		receivedMessage.clear();
+		BC_ASSERT_TRUE(bobManager->decrypt(*bobDeviceId, "bob", *aliceDeviceId, (*aliceRecipients)[0].DRmessage, *aliceCipherMessage, receivedMessage) != lime::PeerDeviceStatus::fail);
+		receivedMessageString = std::string{receivedMessage.begin(), receivedMessage.end()};
+		BC_ASSERT_TRUE(receivedMessageString == lime_tester::messages_pattern[2]);
+
+		/* Check Alice and Bob db holds 3 DR session, one active, two not */
+		sessionsId.clear();
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0); // don't return 0 -> one session is active
+		BC_ASSERT_TRUE(sessionsId.size() == 3); // We have a total of 2 sessions
+		sessionsId.clear();
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0);
+		BC_ASSERT_TRUE(sessionsId.size() == 3);
+
+		// forward time by 2 days
+		lime_tester::forwardTime(dbFilenameAlice, 2);
+		lime_tester::forwardTime(dbFilenameBob, 2);
+
+		/* force reset so the active session is not in cache anymore */
+		if (!continuousSession) { managersClean (aliceManager, bobManager, dbFilenameAlice, dbFilenameBob);}
+
+		// Update Alice and Bob
+		aliceManager->update(*aliceDeviceId, callback, 0, lime_tester::OPkInitialBatchSize);
+		bobManager->update(*bobDeviceId, callback, 0, lime_tester::OPkInitialBatchSize);
+		expected_success+=2;
+		BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success,lime_tester::wait_for_timeout));
+
+		/* Check Alice and Bob db holds 2 DR session, one active, one not as the update has deleted the first staled session */
+		sessionsId.clear();
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0); // don't return 0 -> one session is active
+		BC_ASSERT_TRUE(sessionsId.size() == 2); // We have a total of 2 sessions
+		sessionsId.clear();
+		BC_ASSERT_TRUE(lime_tester::get_DRsessionsId(dbFilenameAlice, *aliceDeviceId, *bobDeviceId, sessionsId) != 0);
+		BC_ASSERT_TRUE(sessionsId.size() == 2);
+
+		// cleaning
+		if (cleanDatabase) {
+			aliceManager->delete_user(*aliceDeviceId, callback);
+			bobManager->delete_user(*bobDeviceId, callback);
+			BC_ASSERT_TRUE(lime_tester::wait_for(bc_stack,&counters.operation_success,expected_success+2,lime_tester::wait_for_timeout));
+			remove(dbFilenameAlice.data());
+			remove(dbFilenameBob.data());
+		}
+	} catch (BctbxException &e) {
+		LIME_LOGE << e;
+		BC_FAIL("");
+	}
+}
+
+static void lime_DR_session_clean(void) {
+#ifdef EC25519_ENABLED
+	lime_DR_session_clean_test(lime::CurveId::c25519, "lime_DR_session_clean", std::string("https://").append(lime_tester::test_x3dh_server_url).append(":").append(lime_tester::test_x3dh_c25519_server_port).data());
+	lime_DR_session_clean_test(lime::CurveId::c25519, "lime_DR_session_clean_clean", std::string("https://").append(lime_tester::test_x3dh_server_url).append(":").append(lime_tester::test_x3dh_c25519_server_port).data(), false);
+#endif
+#ifdef EC448_ENABLED
+	lime_DR_session_clean_test(lime::CurveId::c448, "lime_DR_session_clean", std::string("https://").append(lime_tester::test_x3dh_server_url).append(":").append(lime_tester::test_x3dh_c448_server_port).data());
+	lime_DR_session_clean_test(lime::CurveId::c448, "lime_DR_session_clean_clean", std::string("https://").append(lime_tester::test_x3dh_server_url).append(":").append(lime_tester::test_x3dh_c448_server_port).data(), false);
+#endif
+}
 static test_t tests[] = {
 	TEST_NO_TAG("Basic", x3dh_basic),
 	TEST_NO_TAG("User Management", user_management),
@@ -4278,6 +4470,7 @@ static test_t tests[] = {
 	TEST_NO_TAG("Identity theft", lime_identity_theft),
 	TEST_NO_TAG("Multithread", lime_multithread),
 	TEST_NO_TAG("Session cancel", lime_session_cancel),
+	TEST_NO_TAG("DR Session clean", lime_DR_session_clean),
 	TEST_NO_TAG("DB Migration", lime_db_migration)
 };
 
